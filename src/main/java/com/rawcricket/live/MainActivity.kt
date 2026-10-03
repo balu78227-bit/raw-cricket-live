@@ -12,6 +12,7 @@ import android.view.WindowManager
 import android.widget.*
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.widget.doAfterTextChanged
 import com.pedro.common.ConnectChecker
 import com.pedro.encoder.input.gl.render.filters.`object`.ImageObjectFilterRender
 import com.pedro.encoder.utils.gl.TranslateTo
@@ -23,16 +24,43 @@ import java.util.*
 
 class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
 
-    data class Ball(val runs: Int, val legal: Boolean, val wkt: Boolean, val label: String)
+    data class BS(val r: Int = 0, val b: Int = 0)
+    data class BW(val balls: Int = 0, val runs: Int = 0, val w: Int = 0)
+    data class St(
+        val runs: Int = 0, val wk: Int = 0, val legal: Int = 0, val strike: Int = 0,
+        val bat: Map<String, BS> = emptyMap(), val bowl: Map<String, BW> = emptyMap(),
+        val last: List<String> = emptyList()
+    )
 
-    private val balls = ArrayList<Ball>()
+    private var st = St()
+    private val hist = ArrayList<St>()
     private lateinit var cam: RtmpCamera2
     private lateinit var glView: OpenGlView
-    private lateinit var team: EditText
+    private lateinit var tBat: EditText
+    private lateinit var tBowl: EditText
+    private lateinit var b1: EditText
+    private lateinit var b2: EditText
+    private lateinit var bowler: EditText
     private lateinit var url: EditText
     private lateinit var liveBtn: Button
     private val filter = ImageObjectFilterRender()
     private var filterSet = false
+
+    private val logo: Bitmap? by lazy {
+        try {
+            val id = resources.getIdentifier("logo", "drawable", packageName)
+            if (id != 0) BitmapFactory.decodeResource(resources, id) else null
+        } catch (e: Exception) { null }
+    }
+
+    private fun field(h: String, d: String, size: Float = 12f): EditText =
+        EditText(this).apply {
+            hint = h; setText(d); textSize = size; setSingleLine()
+            setTextColor(Color.WHITE); setHintTextColor(Color.GRAY)
+            doAfterTextChanged { refresh() }
+        }
+
+    private fun lp(w: Float) = LinearLayout.LayoutParams(0, -2, w)
 
     override fun onCreate(s: Bundle?) {
         super.onCreate(s)
@@ -43,26 +71,35 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         glView = OpenGlView(this)
         root.addView(glView, FrameLayout.LayoutParams(-1, -1))
 
-        val top = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(0x66000000) }
-        val row1 = LinearLayout(this)
-        team = EditText(this).apply { hint = "Batting team"; setText("TEAM A"); setTextColor(Color.WHITE); setHintTextColor(Color.GRAY); textSize = 14f }
-        url = EditText(this).apply { hint = "Stream URL + key"; setTextColor(Color.WHITE); setHintTextColor(Color.GRAY); textSize = 12f; setSingleLine() }
+        val top = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setBackgroundColor(0x88000000.toInt()) }
+
+        tBat = field("Batting team", "TEAM A")
+        tBowl = field("Bowling team", "TEAM B")
+        url = field("Stream URL + key", "", 11f)
         liveBtn = Button(this).apply { text = "GO LIVE"; setOnClickListener { toggleLive() } }
-        row1.addView(team, LinearLayout.LayoutParams(0, -2, 1f))
-        row1.addView(url, LinearLayout.LayoutParams(0, -2, 2f))
+        val row1 = LinearLayout(this)
+        row1.addView(tBat, lp(1f)); row1.addView(tBowl, lp(1f)); row1.addView(url, lp(2f))
         row1.addView(liveBtn, LinearLayout.LayoutParams(-2, -2))
         top.addView(row1)
 
+        b1 = field("Batter 1", "Batter 1")
+        b2 = field("Batter 2", "Batter 2")
+        bowler = field("Bowler", "Bowler")
         val row2 = LinearLayout(this)
-        fun btn(t: String, a: () -> Unit) {
-            row2.addView(Button(this).apply { text = t; textSize = 12f; setPadding(0, 0, 0, 0); setOnClickListener { a() } }, LinearLayout.LayoutParams(0, -2, 1f))
-        }
-        for (r in listOf(0, 1, 2, 3, 4, 6)) btn("$r") { add(Ball(r, true, false, "$r")) }
-        btn("Wd") { add(Ball(1, false, false, "Wd")) }
-        btn("Nb") { add(Ball(1, false, false, "Nb")) }
-        btn("W") { add(Ball(0, true, true, "W")) }
-        btn("Undo") { if (balls.isNotEmpty()) { balls.removeAt(balls.size - 1); refresh() } }
+        row2.addView(b1, lp(1f)); row2.addView(b2, lp(1f)); row2.addView(bowler, lp(1f))
         top.addView(row2)
+
+        val row3 = LinearLayout(this)
+        fun btn(t: String, a: () -> Unit) {
+            row3.addView(Button(this).apply { text = t; textSize = 12f; setPadding(0, 0, 0, 0); setOnClickListener { a() } }, lp(1f))
+        }
+        for (r in listOf(0, 1, 2, 3, 4, 6)) btn("$r") { ball("run", r) }
+        btn("Wd") { ball("wd") }
+        btn("Nb") { ball("nb") }
+        btn("W") { ball("w") }
+        btn("Undo") { if (hist.isNotEmpty()) { st = hist.removeAt(hist.size - 1); refresh() } }
+        top.addView(row3)
+
         root.addView(top, FrameLayout.LayoutParams(-1, -2, android.view.Gravity.TOP))
         setContentView(root)
 
@@ -84,10 +121,10 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         try {
             if (!cam.isOnPreview) cam.startPreview()
             if (!filterSet) {
-                filter.setScale(100f, 12.5f)
-                filter.setPosition(TranslateTo.BOTTOM)
+                filter.setScale(100f, 100f)
+                filter.setPosition(TranslateTo.CENTER)
                 cam.getGlInterface().setFilter(filter)
-                filter.setImage(drawBar())
+                filter.setImage(drawOverlay())
                 filterSet = true
             }
         } catch (e: Exception) {
@@ -100,30 +137,130 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         startCam()
     }
 
-    private fun add(b: Ball) { balls.add(b); refresh() }
-    private fun refresh() { if (filterSet) filter.setImage(drawBar()) }
+    private fun nm(e: EditText, d: String) = e.text.toString().trim().ifEmpty { d }
 
-    private fun drawBar(): Bitmap {
-        val w = 1280; val h = 90
-        val runs = balls.sumOf { it.runs }
-        val wk = balls.count { it.wkt }
-        val legal = balls.count { it.legal }
-        val overs = "${legal / 6}.${legal % 6}"
-        val last = balls.takeLast(6).joinToString(" ") { it.label }
+    private fun ball(kind: String, r: Int = 0) {
+        val n1 = nm(b1, "Batter 1"); val n2 = nm(b2, "Batter 2"); val bn = nm(bowler, "Bowler")
+        val sn = if (st.strike == 0) n1 else n2
+        var runs = st.runs; var wk = st.wk; var legal = st.legal; var strike = st.strike
+        val bat = st.bat.toMutableMap(); val bw = st.bowl.toMutableMap()
+        val sb = bat[sn] ?: BS(); val bb = bw[bn] ?: BW()
+        var label = ""
+        when (kind) {
+            "run" -> {
+                runs += r; legal++
+                bat[sn] = BS(sb.r + r, sb.b + 1)
+                bw[bn] = BW(bb.balls + 1, bb.runs + r, bb.w)
+                if (r % 2 == 1) strike = 1 - strike
+                label = "$r"
+            }
+            "wd" -> { runs++; bw[bn] = BW(bb.balls, bb.runs + 1, bb.w); label = "Wd" }
+            "nb" -> { runs++; bw[bn] = BW(bb.balls, bb.runs + 1, bb.w); label = "Nb" }
+            else -> {
+                wk++; legal++
+                bat[sn] = BS(sb.r, sb.b + 1)
+                bw[bn] = BW(bb.balls + 1, bb.runs, bb.w + 1)
+                label = "W"
+                toast("புதிய batter பெயரை மாற்றுங்கள்")
+            }
+        }
+        if ((kind == "run" || kind == "w") && legal % 6 == 0) {
+            strike = 1 - strike
+            toast("ஓவர் முடிந்தது: bowler பெயரை மாற்றுங்கள்")
+        }
+        hist.add(st)
+        st = St(runs, wk, legal, strike, bat, bw, (st.last + label).takeLast(6))
+        refresh()
+    }
+
+    private fun refresh() { if (filterSet) filter.setImage(drawOverlay()) }
+
+    private fun ov(b: Int) = "${b / 6}.${b % 6}"
+
+    private fun fit(c: Canvas, t: String, x: Float, y: Float, maxW: Float, p: Paint) {
+        var s = t
+        while (s.length > 1 && p.measureText(s) > maxW) s = s.dropLast(1)
+        c.drawText(s, x, y, p)
+    }
+
+    private fun drawOverlay(): Bitmap {
+        val w = 1280; val h = 720
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val c = Canvas(bmp)
         val p = Paint(Paint.ANTI_ALIAS_FLAG)
-        p.color = 0xE60B1F3A.toInt(); c.drawRect(0f, 0f, w.toFloat(), h.toFloat(), p)
-        p.color = 0xFFFFC107.toInt(); c.drawRect(0f, 0f, 340f, h.toFloat(), p)
         p.typeface = Typeface.DEFAULT_BOLD
-        p.color = Color.BLACK; p.textSize = 34f
-        c.drawText("RAW CRICKET TN", 16f, 58f, p)
-        p.color = Color.WHITE; p.textSize = 44f
-        c.drawText("${team.text.toString().uppercase()}  $runs/$wk", 360f, 62f, p)
-        p.textSize = 36f; p.color = 0xFFFFC107.toInt()
-        c.drawText("($overs)", 840f, 60f, p)
-        p.textSize = 30f; p.color = Color.WHITE
-        c.drawText(last, 980f, 58f, p)
+        val navy = 0xF00B1F3A.toInt()
+        val gold = 0xFFFFC107.toInt()
+
+        // top-left: logo + channel name
+        var x = 24f
+        val lg = logo
+        if (lg != null && lg.height > 0) {
+            val lh = 64f; val lw = lg.width * lh / lg.height
+            c.drawBitmap(lg, null, RectF(x, 20f, x + lw, 20f + lh), p)
+            x += lw + 10f
+        }
+        p.textSize = 26f
+        val cw = p.measureText("RAW CRICKET TN")
+        p.color = navy; c.drawRoundRect(x, 30f, x + cw + 28f, 74f, 10f, 10f, p)
+        p.color = gold; c.drawText("RAW CRICKET TN", x + 14f, 61f, p)
+
+        val n1 = nm(b1, "Batter 1"); val n2 = nm(b2, "Batter 2"); val bn = nm(bowler, "Bowler")
+        val top = 640f; val bot = 704f
+
+        // this-over pill
+        val lb = st.last.joinToString(" ")
+        if (lb.isNotEmpty()) {
+            p.textSize = 24f
+            val tw = p.measureText(lb)
+            p.color = navy; c.drawRoundRect(20f, top - 44f, 20f + tw + 24f, top - 8f, 8f, 8f, p)
+            p.color = Color.WHITE; c.drawText(lb, 32f, top - 17f, p)
+        }
+
+        // bar
+        p.color = navy; c.drawRect(20f, top, 1260f, bot, p)
+        p.color = gold; c.drawRect(20f, top, 390f, bot, p)
+        c.drawRect(1150f, top, 1260f, bot, p)
+
+        // batting team + score + overs
+        p.color = Color.BLACK; p.textSize = 30f
+        fit(c, nm(tBat, "TEAM A").uppercase(), 32f, top + 42f, 130f, p)
+        p.textSize = 38f
+        val sc = "${st.runs}-${st.wk}"
+        c.drawText(sc, 172f, top + 44f, p)
+        val sw = p.measureText(sc)
+        p.textSize = 24f
+        c.drawText(ov(st.legal), 172f + sw + 10f, top + 42f, p)
+
+        // batters
+        for (i in 0..1) {
+            val name = if (i == 0) n1 else n2
+            val s = st.bat[name] ?: BS()
+            val bx = 405f + i * 240f
+            p.color = Color.WHITE; p.textSize = 26f
+            fit(c, name + if (st.strike == i) "*" else "", bx, top + 41f, 125f, p)
+            p.color = gold; p.textSize = 34f
+            val rs = "${s.r}"
+            c.drawText(rs, bx + 135f, top + 43f, p)
+            val rw = p.measureText(rs)
+            p.color = Color.WHITE; p.textSize = 20f
+            c.drawText("${s.b}", bx + 135f + rw + 5f, top + 41f, p)
+        }
+
+        // bowler
+        val bw = st.bowl[bn] ?: BW()
+        p.color = Color.WHITE; p.textSize = 26f
+        fit(c, bn, 890f, top + 41f, 125f, p)
+        p.color = gold; p.textSize = 34f
+        val ws = "${bw.w}-${bw.runs}"
+        c.drawText(ws, 1025f, top + 43f, p)
+        val wsw = p.measureText(ws)
+        p.color = Color.WHITE; p.textSize = 20f
+        c.drawText(ov(bw.balls), 1025f + wsw + 5f, top + 41f, p)
+
+        // bowling team
+        p.color = Color.BLACK; p.textSize = 28f
+        fit(c, nm(tBowl, "TEAM B").uppercase(), 1160f, top + 42f, 92f, p)
         return bmp
     }
 
