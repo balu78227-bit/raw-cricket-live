@@ -370,3 +370,4 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
     override fun onDisconnect() { toast("Disconnected") }
     override fun onAuthError() { toast("Auth error") }
     override fun onAuthSuccess() {}
+}
