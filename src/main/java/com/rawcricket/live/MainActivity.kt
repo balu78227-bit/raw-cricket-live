@@ -39,6 +39,10 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         val fh: Boolean = false, val extras: Int = 0,
         val n1: String = "", val n2: String = "", val bn: String = ""
     )
+    data class Inn(
+        val team: String, val runs: Int, val wk: Int, val legal: Int,
+        val bat: Map<String, BS>, val outs: Set<String>, val bowl: Map<String, BW>
+    )
 
     private var st = St()
     private val hist = ArrayList<St>()
@@ -67,6 +71,12 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
     private var freeHitOn = true
     private var innings = 1
     private var target = 0
+
+    private var inn1: Inn? = null
+    private var inn2: Inn? = null
+    private var matchOver = false
+    private var resultText = ""
+    private var cardPage = 0
 
     private val logo: Bitmap? by lazy {
         try {
@@ -120,11 +130,16 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         val teamsBtn = Button(this).apply { text = "TEAMS"; textSize = 12f; setOnClickListener { showTeams() } }
         val matchBtn = Button(this).apply { text = "MATCH"; textSize = 12f; setOnClickListener { showMatch() } }
         val swapBtn = Button(this).apply { text = "SWAP"; textSize = 12f; setOnClickListener { confirmSwap() } }
+        val cardBtn = Button(this).apply {
+            text = "CARD"; textSize = 12f
+            setOnClickListener { cardPage = (cardPage + 1) % 3; refresh() }
+        }
         val row2 = LinearLayout(this)
         row2.addView(b1, lp(1f)); row2.addView(b2, lp(1f)); row2.addView(bowler, lp(1f))
         row2.addView(teamsBtn, LinearLayout.LayoutParams(-2, -2))
         row2.addView(matchBtn, LinearLayout.LayoutParams(-2, -2))
         row2.addView(swapBtn, LinearLayout.LayoutParams(-2, -2))
+        row2.addView(cardBtn, LinearLayout.LayoutParams(-2, -2))
         top.addView(row2)
 
         val row3 = LinearLayout(this)
@@ -281,11 +296,21 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         choose("யார் அவுட்?", items) { cb(it) }
     }
 
+    private fun snap() = Inn(nm(tBat, "TEAM A"), st.runs, st.wk, st.legal, st.bat, st.outs, st.bowl)
+
     private fun confirmSwap() {
         val msg = if (innings == 1) "ஸ்கோர் பூஜ்ஜியமாகும். இலக்கு: ${st.runs + 1}" else "புதிய போட்டி தொடங்கும். ஸ்கோர் பூஜ்ஜியமாகும்."
         AlertDialog.Builder(this).setTitle("Innings மாற்றவா?").setMessage(msg)
             .setPositiveButton("ஆம்") { _, _ ->
-                if (innings == 1) { target = st.runs + 1; innings = 2 } else { target = 0; innings = 1 }
+                if (innings == 1) {
+                    inn1 = snap()
+                    target = st.runs + 1
+                    innings = 2
+                } else {
+                    inn1 = null; inn2 = null; matchOver = false; resultText = ""
+                    target = 0; innings = 1
+                }
+                cardPage = 0
                 val a = tBat.text.toString()
                 tBat.setText(tBowl.text.toString())
                 tBowl.setText(a)
@@ -304,10 +329,45 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         if (hist.isEmpty()) return
         val s = hist.removeAt(hist.size - 1)
         st = s
+        if (matchOver) { matchOver = false; inn2 = null; resultText = ""; cardPage = 0 }
         if (s.n1.isNotEmpty()) b1.setText(s.n1)
         if (s.n2.isNotEmpty()) b2.setText(s.n2)
         if (s.bn.isNotEmpty()) bowler.setText(s.bn)
         refresh()
+    }
+
+    // ---------- match result ----------
+
+    private fun finishMatch() {
+        val a = inn1 ?: return
+        val b = snap()
+        inn2 = b
+        matchOver = true
+        resultText = when {
+            b.runs > a.runs -> {
+                val wl = (maxWk() - b.wk).coerceAtLeast(1)
+                "${b.team.uppercase()} WON BY $wl ${if (wl == 1) "WICKET" else "WICKETS"}"
+            }
+            b.runs == a.runs -> "MATCH TIED"
+            else -> {
+                val d = a.runs - b.runs
+                "${a.team.uppercase()} WON BY $d ${if (d == 1) "RUN" else "RUNS"}"
+            }
+        }
+        cardPage = 1
+        refresh()
+        toast(resultText)
+    }
+
+    private fun cards(): List<Inn> {
+        val l = ArrayList<Inn>()
+        if (innings == 1) {
+            l.add(snap())
+        } else {
+            inn1?.let { l.add(it) }
+            l.add(inn2 ?: snap())
+        }
+        return l
     }
 
     // ---------- scoring (MCC laws based) ----------
@@ -374,6 +434,8 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         faced: Boolean = true, wk: String? = null, outSlot: Int = 0,
         credit: Boolean = false, setFH: Boolean = false
     ) {
+        if (matchOver) { toast("போட்டி முடிந்தது. தவறு என்றால் Undo அழுத்துங்கள்"); return }
+        cardPage = 0
         val n1 = nm(b1, "Batter 1"); val n2 = nm(b2, "Batter 2"); val bn = nm(bowler, "Bowler")
         val sn = if (st.strike == 0) n1 else n2
         val bat = st.bat.toMutableMap(); val bw = st.bowl.toMutableMap()
@@ -398,8 +460,11 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         val chased = innings == 2 && target > 0 && st.runs >= target
         val allOut = st.wk >= maxWk()
         val oversDone = st.legal >= totalOvers * 6
-        if (chased) { toast("இலக்கை எட்டியது! போட்டி முடிந்தது"); return }
-        if (allOut || oversDone) { toast("Innings முடிந்தது. SWAP அழுத்துங்கள்"); return }
+        if (chased) { finishMatch(); return }
+        if (allOut || oversDone) {
+            if (innings == 2) finishMatch() else toast("Innings முடிந்தது. SWAP அழுத்துங்கள்")
+            return
+        }
         if (wk != null) {
             pickBatter(outSlot) { if (overEnded) pickBowler() }
         } else if (overEnded) {
@@ -466,12 +531,125 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         c.drawText(s, x, y, p)
     }
 
+    private fun drawInnings(c: Canvas, p: Paint, inn: Inn, x: Float, w: Float, y0: Float) {
+        val gold = 0xFFFFC107.toInt()
+        var y = y0 + 30f
+        p.textAlign = Paint.Align.LEFT
+        p.color = gold; p.textSize = 30f
+        fit(c, inn.team.uppercase(), x, y, w - 190f, p)
+        p.textAlign = Paint.Align.RIGHT
+        c.drawText("${inn.runs}-${inn.wk} (${ov(inn.legal)})", x + w, y, p)
+        p.textAlign = Paint.Align.LEFT
+        y += 30f
+        p.textSize = 18f; p.color = Color.LTGRAY
+        c.drawText("BATTING", x, y, p)
+        y += 24f
+        p.textSize = 21f
+        for ((n, s) in inn.bat.entries.take(11)) {
+            p.color = Color.WHITE; p.textAlign = Paint.Align.LEFT
+            fit(c, n + (if (n in inn.outs) "" else "*"), x, y, w - 130f, p)
+            p.color = gold; p.textAlign = Paint.Align.RIGHT
+            c.drawText("${s.r} (${s.b})", x + w, y, p)
+            y += 25f
+        }
+        p.textAlign = Paint.Align.LEFT
+        y += 12f
+        p.textSize = 18f; p.color = Color.LTGRAY
+        c.drawText("BOWLING", x, y, p)
+        y += 24f
+        p.textSize = 21f
+        for ((n, b) in inn.bowl.entries.filter { it.value.balls > 0 || it.value.runs > 0 }.take(6)) {
+            p.color = Color.WHITE; p.textAlign = Paint.Align.LEFT
+            fit(c, n, x, y, w - 190f, p)
+            p.color = gold; p.textAlign = Paint.Align.RIGHT
+            c.drawText("${b.w}-${b.runs} (${ov(b.balls)})", x + w, y, p)
+            y += 25f
+        }
+        p.textAlign = Paint.Align.LEFT
+    }
+
+    private fun drawMvp(c: Canvas, p: Paint, list: List<Inn>) {
+        class PS(var r: Int = 0, var b: Int = 0, var w: Int = 0, var rc: Int = 0, var bl: Int = 0)
+        val gold = 0xFFFFC107.toInt()
+        val m = mutableMapOf<String, PS>()
+        for (inn in list) {
+            for ((n, s) in inn.bat) { val q = m.getOrPut(n) { PS() }; q.r += s.r; q.b += s.b }
+            for ((n, b) in inn.bowl) { val q = m.getOrPut(n) { PS() }; q.w += b.w; q.rc += b.runs; q.bl += b.balls }
+        }
+        val rows = m.entries.sortedByDescending { it.value.r + 20 * it.value.w }.take(9)
+        p.textAlign = Paint.Align.LEFT
+        if (rows.isEmpty()) {
+            p.color = Color.WHITE; p.textSize = 30f
+            c.drawText("இன்னும் தரவு இல்லை", 30f, 160f, p)
+            return
+        }
+        val first = rows[0]
+        p.color = gold; p.textSize = 34f
+        fit(c, "MVP - ${first.key.uppercase()}  (${first.value.r + 20 * first.value.w} pts)", 30f, 130f, 1220f, p)
+
+        p.textSize = 20f; p.color = Color.LTGRAY
+        c.drawText("#", 30f, 178f, p)
+        c.drawText("PLAYER", 80f, 178f, p)
+        p.textAlign = Paint.Align.RIGHT
+        c.drawText("BAT", 800f, 178f, p)
+        c.drawText("BOWL", 1030f, 178f, p)
+        c.drawText("POINTS", 1250f, 178f, p)
+
+        var y = 225f
+        for ((i, e) in rows.withIndex()) {
+            val q = e.value
+            if (i % 2 == 0) {
+                p.color = 0x22FFFFFF
+                c.drawRect(30f, y - 33f, 1250f, y + 12f, p)
+            }
+            p.textSize = 28f
+            p.textAlign = Paint.Align.LEFT
+            p.color = if (i == 0) gold else Color.WHITE
+            c.drawText("${i + 1}", 30f, y, p)
+            fit(c, e.key, 80f, y, 450f, p)
+            p.textAlign = Paint.Align.RIGHT
+            c.drawText(if (q.b > 0 || q.r > 0) "${q.r} (${q.b})" else "-", 800f, y, p)
+            c.drawText(if (q.bl > 0) "${q.w}-${q.rc} (${ov(q.bl)})" else "-", 1030f, y, p)
+            p.color = gold
+            c.drawText("${q.r + 20 * q.w}", 1250f, y, p)
+            y += 48f
+        }
+        p.textAlign = Paint.Align.LEFT
+        p.textSize = 18f; p.color = Color.LTGRAY
+        c.drawText("Points = Runs + 20 x Wickets", 30f, 700f, p)
+    }
+
+    private fun drawCard(c: Canvas, p: Paint) {
+        val gold = 0xFFFFC107.toInt()
+        p.color = 0xFA0B1F3A.toInt(); c.drawRect(0f, 0f, 1280f, 720f, p)
+        p.color = gold; c.drawRect(0f, 0f, 1280f, 8f, p)
+        p.textAlign = Paint.Align.LEFT
+        p.textSize = 26f; p.color = gold
+        c.drawText("RAW CRICKET TN", 30f, 52f, p)
+        val head = if (matchOver) resultText else "MATCH SCORECARD"
+        p.textSize = 38f; p.color = Color.WHITE
+        p.textAlign = Paint.Align.RIGHT
+        c.drawText(head, 1250f, 56f, p)
+        p.textAlign = Paint.Align.LEFT
+        p.color = gold; c.drawRect(30f, 78f, 1250f, 81f, p)
+        val list = cards()
+        if (cardPage == 1) {
+            for (i in list.indices) drawInnings(c, p, list[i], if (i == 0) 30f else 660f, 590f, 100f)
+        } else {
+            drawMvp(c, p, list)
+        }
+    }
+
     private fun drawOverlay(): Bitmap {
         val w = 1280; val h = 720
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val c = Canvas(bmp)
         val p = Paint(Paint.ANTI_ALIAS_FLAG)
         p.typeface = Typeface.DEFAULT_BOLD
+        if (cardPage != 0) {
+            drawCard(c, p)
+            return bmp
+        }
         val navy = 0xF00B1F3A.toInt()
         val gold = 0xFFFFC107.toInt()
 
