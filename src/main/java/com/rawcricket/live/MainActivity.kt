@@ -36,6 +36,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         val bat: Map<String, BS> = emptyMap(), val bowl: Map<String, BW> = emptyMap(),
         val last: List<String> = emptyList(),
         val outs: Set<String> = emptySet(), val lastBowler: String = "",
+        val fh: Boolean = false, val extras: Int = 0,
         val n1: String = "", val n2: String = "", val bn: String = ""
     )
 
@@ -60,6 +61,12 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
     private var playersA: List<String> = emptyList()
     private var playersB: List<String> = emptyList()
     private var batIsA = true
+
+    private var totalOvers = 10
+    private var maxPerBowler = 0
+    private var freeHitOn = true
+    private var innings = 1
+    private var target = 0
 
     private val logo: Bitmap? by lazy {
         try {
@@ -111,10 +118,12 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         b2.setOnClickListener { pickBatter(1) {} }
         bowler.setOnClickListener { pickBowler() }
         val teamsBtn = Button(this).apply { text = "TEAMS"; textSize = 12f; setOnClickListener { showTeams() } }
+        val matchBtn = Button(this).apply { text = "MATCH"; textSize = 12f; setOnClickListener { showMatch() } }
         val swapBtn = Button(this).apply { text = "SWAP"; textSize = 12f; setOnClickListener { confirmSwap() } }
         val row2 = LinearLayout(this)
         row2.addView(b1, lp(1f)); row2.addView(b2, lp(1f)); row2.addView(bowler, lp(1f))
         row2.addView(teamsBtn, LinearLayout.LayoutParams(-2, -2))
+        row2.addView(matchBtn, LinearLayout.LayoutParams(-2, -2))
         row2.addView(swapBtn, LinearLayout.LayoutParams(-2, -2))
         top.addView(row2)
 
@@ -122,9 +131,13 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         fun btn(t: String, a: () -> Unit) {
             row3.addView(Button(this).apply { text = t; textSize = 12f; setPadding(0, 0, 0, 0); setOnClickListener { a() } }, lp(1f))
         }
-        for (r in listOf(0, 1, 2, 3, 4, 6)) btn("$r") { ball("run", r) }
-        btn("Wd") { ball("wd") }
-        btn("Nb") { ball("nb") }
+        for (r in listOf(0, 1, 2, 3, 4, 6)) btn("$r") {
+            deliver(true, "$r", batRuns = r, bowlerRuns = r, cross = if (r >= 4) 0 else r)
+        }
+        btn("Wd") { askWide() }
+        btn("Nb") { askNb() }
+        btn("B") { askBye(false) }
+        btn("LB") { askBye(true) }
         btn("W") { askOut() }
         btn("Undo") { undo() }
         top.addView(row3)
@@ -143,12 +156,15 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         }
     }
 
-    // ---------- teams & pickers ----------
+    // ---------- teams, match settings, pickers ----------
 
     private fun prefs() = getSharedPreferences("rc", MODE_PRIVATE)
     private fun parse(s: String) = s.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
     private fun batPlayers() = if (batIsA) playersA else playersB
     private fun bowlPlayers() = if (batIsA) playersB else playersA
+    private fun maxWk(): Int { val n = batPlayers().size; return if (n >= 2) n - 1 else 10 }
+    private fun bowlerCap(): Int =
+        if (maxPerBowler > 0) maxPerBowler else Math.ceil(totalOvers / 5.0).toInt().coerceAtLeast(1)
 
     private fun loadTeams() {
         val p = prefs()
@@ -156,8 +172,31 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         nameB = p.getString("nB", "") ?: ""
         playersA = parse(p.getString("pA", "") ?: "")
         playersB = parse(p.getString("pB", "") ?: "")
+        totalOvers = p.getInt("ov", 10)
+        maxPerBowler = p.getInt("mb", 0)
+        freeHitOn = p.getBoolean("fh", true)
         if (nameA.isNotEmpty()) tBat.setText(nameA)
         if (nameB.isNotEmpty()) tBowl.setText(nameB)
+    }
+
+    private fun showMatch() {
+        val eO = EditText(this).apply { hint = "மொத்த ஓவர்கள்"; setText("$totalOvers"); inputType = InputType.TYPE_CLASS_NUMBER }
+        val eB = EditText(this).apply { hint = "ஒரு bowler-க்கு அதிகபட்ச ஓவர் (0 = தானாக)"; setText("$maxPerBowler"); inputType = InputType.TYPE_CLASS_NUMBER }
+        val cb = CheckBox(this).apply { text = "No-ball-க்குப் பின் Free Hit"; isChecked = freeHitOn }
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 12, 24, 12) }
+        box.addView(eO); box.addView(eB); box.addView(cb)
+        AlertDialog.Builder(this).setTitle("போட்டி விதிகள்")
+            .setMessage("தானாக = மொத்த ஓவர் ÷ 5 (மேல்நோக்கி)")
+            .setView(box)
+            .setPositiveButton("Save") { _, _ ->
+                totalOvers = eO.text.toString().toIntOrNull()?.coerceAtLeast(1) ?: totalOvers
+                maxPerBowler = eB.text.toString().toIntOrNull()?.coerceAtLeast(0) ?: maxPerBowler
+                freeHitOn = cb.isChecked
+                prefs().edit().putInt("ov", totalOvers).putInt("mb", maxPerBowler).putBoolean("fh", freeHitOn).apply()
+                refresh()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
     }
 
     private fun showTeams() {
@@ -215,6 +254,12 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
             .show()
     }
 
+    private fun choose(title: String, items: List<String>, cb: (Int) -> Unit) {
+        AlertDialog.Builder(this).setTitle(title)
+            .setItems(items.toTypedArray()) { _, i -> cb(i) }
+            .show()
+    }
+
     private fun pickBatter(slot: Int, after: () -> Unit) {
         val other = nm(if (slot == 0) b2 else b1, "")
         val opts = batPlayers().filter { it !in st.outs && it != other }
@@ -225,21 +270,22 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
     }
 
     private fun pickBowler() {
-        val opts = bowlPlayers().filter { it != st.lastBowler }
+        val cap = bowlerCap() * 6
+        val opts = bowlPlayers().filter { it != st.lastBowler && (st.bowl[it]?.balls ?: 0) < cap }
         pick("Bowler", opts) { name -> bowler.setText(name) }
     }
 
-    private fun askOut() {
+    private fun askWho(cb: (Int) -> Unit) {
         val n1 = nm(b1, "Batter 1"); val n2 = nm(b2, "Batter 2")
-        val items = arrayOf(n1 + (if (st.strike == 0) "*" else ""), n2 + (if (st.strike == 1) "*" else ""))
-        AlertDialog.Builder(this).setTitle("யார் அவுட்?")
-            .setItems(items) { _, i -> ball("w", 0, i) }
-            .show()
+        val items = listOf(n1 + (if (st.strike == 0) "*" else ""), n2 + (if (st.strike == 1) "*" else ""))
+        choose("யார் அவுட்?", items) { cb(it) }
     }
 
     private fun confirmSwap() {
-        AlertDialog.Builder(this).setTitle("Innings மாற்றவா?").setMessage("ஸ்கோர் பூஜ்ஜியமாகும்.")
+        val msg = if (innings == 1) "ஸ்கோர் பூஜ்ஜியமாகும். இலக்கு: ${st.runs + 1}" else "புதிய போட்டி தொடங்கும். ஸ்கோர் பூஜ்ஜியமாகும்."
+        AlertDialog.Builder(this).setTitle("Innings மாற்றவா?").setMessage(msg)
             .setPositiveButton("ஆம்") { _, _ ->
+                if (innings == 1) { target = st.runs + 1; innings = 2 } else { target = 0; innings = 1 }
                 val a = tBat.text.toString()
                 tBat.setText(tBowl.text.toString())
                 tBowl.setText(a)
@@ -262,6 +308,103 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         if (s.n2.isNotEmpty()) b2.setText(s.n2)
         if (s.bn.isNotEmpty()) bowler.setText(s.bn)
         refresh()
+    }
+
+    // ---------- scoring (MCC laws based) ----------
+
+    private fun askWide() {
+        val items = listOf("Wd", "Wd+1", "Wd+2", "Wd+3", "Wd+4", "Wd + Run out", "Wd + Stumped")
+        choose("Wide", items) { i ->
+            when {
+                i <= 4 -> deliver(false, items[i], extra = 1 + i, bowlerRuns = 1 + i, cross = if (i == 4) 0 else i, faced = false)
+                i == 5 -> askWho { s -> deliver(false, "Wd+RO", extra = 1, bowlerRuns = 1, faced = false, wk = "Run out", outSlot = s) }
+                else -> deliver(false, "Wd+St", extra = 1, bowlerRuns = 1, faced = false, wk = "Stumped", outSlot = st.strike, credit = true)
+            }
+        }
+    }
+
+    private fun askNb() {
+        val items = listOf("Nb", "Nb+1", "Nb+2", "Nb+3", "Nb+4", "Nb+6", "Nb+Bye 1", "Nb+Bye 2", "Nb+Bye 4", "Nb + Run out")
+        val bats = listOf(0, 1, 2, 3, 4, 6)
+        choose("No-ball", items) { i ->
+            when {
+                i < 6 -> {
+                    val r = bats[i]
+                    deliver(false, items[i], batRuns = r, extra = 1, bowlerRuns = 1 + r, cross = if (r >= 4) 0 else r, setFH = freeHitOn)
+                }
+                i < 9 -> {
+                    val n = listOf(1, 2, 4)[i - 6]
+                    deliver(false, "Nb+B$n", extra = 1 + n, bowlerRuns = 1, cross = if (n == 4) 0 else n, setFH = freeHitOn)
+                }
+                else -> askWho { s -> deliver(false, "Nb+RO", extra = 1, bowlerRuns = 1, wk = "Run out", outSlot = s, setFH = freeHitOn) }
+            }
+        }
+    }
+
+    private fun askBye(leg: Boolean) {
+        val items = listOf("1", "2", "3", "4")
+        choose(if (leg) "Leg byes" else "Byes", items) { i ->
+            val n = i + 1
+            deliver(true, (if (leg) "LB" else "B") + n, extra = n, cross = if (n == 4) 0 else n)
+        }
+    }
+
+    private fun askOut() {
+        val types = if (st.fh) listOf("Run out", "Obstructing/Handled/Timed out")
+        else listOf("Bowled", "Caught", "LBW", "Stumped", "Hit wicket", "Run out", "Obstructing/Handled/Timed out")
+        choose("Dismissal", types) { i ->
+            val t = types[i]
+            if (t in listOf("Bowled", "Caught", "LBW", "Stumped", "Hit wicket")) {
+                deliver(true, "W", wk = t, outSlot = st.strike, credit = true)
+            } else {
+                askWho { slot ->
+                    choose("ஓடிய ரன்கள்", listOf("0", "1", "2", "3")) { r ->
+                        deliver(true, if (t == "Run out") "RO" else "W", batRuns = r, bowlerRuns = r, cross = r, wk = t, outSlot = slot)
+                    }
+                }
+            }
+        }
+    }
+
+    private fun nm(e: EditText, d: String) = e.text.toString().trim().ifEmpty { d }
+
+    private fun deliver(
+        legal: Boolean, label: String,
+        batRuns: Int = 0, extra: Int = 0, bowlerRuns: Int = 0, cross: Int = 0,
+        faced: Boolean = true, wk: String? = null, outSlot: Int = 0,
+        credit: Boolean = false, setFH: Boolean = false
+    ) {
+        val n1 = nm(b1, "Batter 1"); val n2 = nm(b2, "Batter 2"); val bn = nm(bowler, "Bowler")
+        val sn = if (st.strike == 0) n1 else n2
+        val bat = st.bat.toMutableMap(); val bw = st.bowl.toMutableMap()
+        val sb = bat[sn] ?: BS(); val bb = bw[bn] ?: BW()
+        if (faced || batRuns > 0) bat[sn] = BS(sb.r + batRuns, sb.b + (if (faced) 1 else 0))
+        bw[bn] = BW(bb.balls + (if (legal) 1 else 0), bb.runs + bowlerRuns, bb.w + (if (wk != null && credit) 1 else 0))
+        val newLegal = st.legal + (if (legal) 1 else 0)
+        var strike = st.strike
+        if (cross % 2 == 1) strike = 1 - strike
+        val overEnded = legal && newLegal % 6 == 0
+        if (overEnded) strike = 1 - strike
+        val outs = if (wk != null) st.outs + (if (outSlot == 0) n1 else n2) else st.outs
+        val fh = if (setFH) true else if (legal) false else st.fh
+        hist.add(st.copy(n1 = n1, n2 = n2, bn = bn))
+        st = St(
+            st.runs + batRuns + extra, st.wk + (if (wk != null) 1 else 0), newLegal, strike,
+            bat, bw, (st.last + label).takeLast(6), outs, if (overEnded) bn else st.lastBowler,
+            fh, st.extras + extra
+        )
+        refresh()
+
+        val chased = innings == 2 && target > 0 && st.runs >= target
+        val allOut = st.wk >= maxWk()
+        val oversDone = st.legal >= totalOvers * 6
+        if (chased) { toast("இலக்கை எட்டியது! போட்டி முடிந்தது"); return }
+        if (allOut || oversDone) { toast("Innings முடிந்தது. SWAP அழுத்துங்கள்"); return }
+        if (wk != null) {
+            pickBatter(outSlot) { if (overEnded) pickBowler() }
+        } else if (overEnded) {
+            pickBowler()
+        }
     }
 
     // ---------- camera ----------
@@ -307,47 +450,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         startCam()
     }
 
-    // ---------- scoring ----------
-
-    private fun nm(e: EditText, d: String) = e.text.toString().trim().ifEmpty { d }
-
-    private fun ball(kind: String, r: Int = 0, outSlot: Int = 0) {
-        val n1 = nm(b1, "Batter 1"); val n2 = nm(b2, "Batter 2"); val bn = nm(bowler, "Bowler")
-        val sn = if (st.strike == 0) n1 else n2
-        var runs = st.runs; var wk = st.wk; var legal = st.legal; var strike = st.strike
-        val bat = st.bat.toMutableMap(); val bw = st.bowl.toMutableMap()
-        val sb = bat[sn] ?: BS(); val bb = bw[bn] ?: BW()
-        var outs = st.outs
-        var label = ""
-        when (kind) {
-            "run" -> {
-                runs += r; legal++
-                bat[sn] = BS(sb.r + r, sb.b + 1)
-                bw[bn] = BW(bb.balls + 1, bb.runs + r, bb.w)
-                if (r % 2 == 1) strike = 1 - strike
-                label = "$r"
-            }
-            "wd" -> { runs++; bw[bn] = BW(bb.balls, bb.runs + 1, bb.w); label = "Wd" }
-            "nb" -> { runs++; bw[bn] = BW(bb.balls, bb.runs + 1, bb.w); label = "Nb" }
-            else -> {
-                wk++; legal++
-                bat[sn] = BS(sb.r, sb.b + 1)
-                bw[bn] = BW(bb.balls + 1, bb.runs, bb.w + 1)
-                label = "W"
-                outs = outs + (if (outSlot == 0) n1 else n2)
-            }
-        }
-        val overEnded = (kind == "run" || kind == "w") && legal % 6 == 0
-        if (overEnded) strike = 1 - strike
-        hist.add(st.copy(n1 = n1, n2 = n2, bn = bn))
-        st = St(runs, wk, legal, strike, bat, bw, (st.last + label).takeLast(6), outs, if (overEnded) bn else st.lastBowler)
-        refresh()
-        if (kind == "w") {
-            pickBatter(outSlot) { if (overEnded) pickBowler() }
-        } else if (overEnded) {
-            pickBowler()
-        }
-    }
+    // ---------- overlay ----------
 
     private fun refresh() {
         if (filterSet) {
@@ -384,6 +487,13 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         p.color = navy; c.drawRoundRect(x, 30f, x + cw + 28f, 74f, 10f, 10f, p)
         p.color = gold; c.drawText("RAW CRICKET TN", x + 14f, 61f, p)
 
+        if (st.fh) {
+            p.textSize = 28f
+            val tw = p.measureText("FREE HIT")
+            p.color = gold; c.drawRoundRect(1260f - tw - 36f, 30f, 1260f, 74f, 10f, 10f, p)
+            p.color = Color.BLACK; c.drawText("FREE HIT", 1260f - tw - 18f, 62f, p)
+        }
+
         val n1 = nm(b1, "Batter 1"); val n2 = nm(b2, "Batter 2"); val bn = nm(bowler, "Bowler")
         val top = 640f; val bot = 704f
 
@@ -393,6 +503,16 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
             val tw = p.measureText(lb)
             p.color = navy; c.drawRoundRect(20f, top - 44f, 20f + tw + 24f, top - 8f, 8f, 8f, p)
             p.color = Color.WHITE; c.drawText(lb, 32f, top - 17f, p)
+        }
+
+        if (innings == 2 && target > 0) {
+            val need = target - st.runs
+            val left = totalOvers * 6 - st.legal
+            val t = if (need <= 0) "TARGET $target - REACHED" else "TARGET $target  Need $need off $left"
+            p.textSize = 24f
+            val tw = p.measureText(t)
+            p.color = navy; c.drawRoundRect(1260f - tw - 24f, top - 44f, 1260f, top - 8f, 8f, 8f, p)
+            p.color = gold; c.drawText(t, 1260f - tw - 12f, top - 17f, p)
         }
 
         p.color = navy; c.drawRect(20f, top, 1260f, bot, p)
@@ -507,15 +627,15 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
             return
         }
         if (cam.isRecording) { toast("முதலில் REC-ஐ நிறுத்துங்கள்"); return }
-        val target = url.text.toString().trim()
-        if (target.isEmpty()) { toast("Stream URL + key உள்ளிடுங்கள்"); return }
+        val target2 = url.text.toString().trim()
+        if (target2.isEmpty()) { toast("Stream URL + key உள்ளிடுங்கள்"); return }
         if (!hasPerms()) { toast("Camera/Mic அனுமதி தேவை"); return }
         try {
             if (cam.prepareAudio() && cam.prepareVideo(1280, 720, 30, 2500 * 1000, 0)) {
                 val f = newRecFile()
                 recFile = f
                 try { cam.startRecord(f.absolutePath) } catch (e: Exception) { recFile = null; toast("Recording தொடங்கவில்லை") }
-                cam.startStream(target)
+                cam.startStream(target2)
                 liveBtn.text = "STOP"
                 installFilterSoon()
             } else toast("Camera/Audio தயாராகவில்லை")
