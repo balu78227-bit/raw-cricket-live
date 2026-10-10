@@ -2,6 +2,7 @@ package com.rawcricket.live
 
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.ContentValues
 import android.content.pm.PackageManager
 import android.graphics.*
@@ -9,6 +10,7 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.text.InputType
 import android.view.SurfaceHolder
 import android.view.View
 import android.view.WindowManager
@@ -32,7 +34,9 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
     data class St(
         val runs: Int = 0, val wk: Int = 0, val legal: Int = 0, val strike: Int = 0,
         val bat: Map<String, BS> = emptyMap(), val bowl: Map<String, BW> = emptyMap(),
-        val last: List<String> = emptyList()
+        val last: List<String> = emptyList(),
+        val outs: Set<String> = emptySet(), val lastBowler: String = "",
+        val n1: String = "", val n2: String = "", val bn: String = ""
     )
 
     private var st = St()
@@ -50,6 +54,12 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
     private var recFile: File? = null
     private var filter = ImageObjectFilterRender()
     private var filterSet = false
+
+    private var nameA = ""
+    private var nameB = ""
+    private var playersA: List<String> = emptyList()
+    private var playersB: List<String> = emptyList()
+    private var batIsA = true
 
     private val logo: Bitmap? by lazy {
         try {
@@ -92,8 +102,20 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         b1 = field("Batter 1", "Batter 1")
         b2 = field("Batter 2", "Batter 2")
         bowler = field("Bowler", "Bowler")
+        for (e in listOf(b1, b2, bowler)) {
+            e.isFocusable = false
+            e.isFocusableInTouchMode = false
+            e.isCursorVisible = false
+        }
+        b1.setOnClickListener { pickBatter(0) {} }
+        b2.setOnClickListener { pickBatter(1) {} }
+        bowler.setOnClickListener { pickBowler() }
+        val teamsBtn = Button(this).apply { text = "TEAMS"; textSize = 12f; setOnClickListener { showTeams() } }
+        val swapBtn = Button(this).apply { text = "SWAP"; textSize = 12f; setOnClickListener { confirmSwap() } }
         val row2 = LinearLayout(this)
         row2.addView(b1, lp(1f)); row2.addView(b2, lp(1f)); row2.addView(bowler, lp(1f))
+        row2.addView(teamsBtn, LinearLayout.LayoutParams(-2, -2))
+        row2.addView(swapBtn, LinearLayout.LayoutParams(-2, -2))
         top.addView(row2)
 
         val row3 = LinearLayout(this)
@@ -103,12 +125,14 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         for (r in listOf(0, 1, 2, 3, 4, 6)) btn("$r") { ball("run", r) }
         btn("Wd") { ball("wd") }
         btn("Nb") { ball("nb") }
-        btn("W") { ball("w") }
-        btn("Undo") { if (hist.isNotEmpty()) { st = hist.removeAt(hist.size - 1); refresh() } }
+        btn("W") { askOut() }
+        btn("Undo") { undo() }
         top.addView(row3)
 
         root.addView(top, FrameLayout.LayoutParams(-1, -2, android.view.Gravity.TOP))
         setContentView(root)
+
+        loadTeams()
 
         cam = RtmpCamera2(glView, this)
         glView.holder.addCallback(this)
@@ -118,6 +142,129 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
             ActivityCompat.requestPermissions(this, perms, 1)
         }
     }
+
+    // ---------- teams & pickers ----------
+
+    private fun prefs() = getSharedPreferences("rc", MODE_PRIVATE)
+    private fun parse(s: String) = s.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
+    private fun batPlayers() = if (batIsA) playersA else playersB
+    private fun bowlPlayers() = if (batIsA) playersB else playersA
+
+    private fun loadTeams() {
+        val p = prefs()
+        nameA = p.getString("nA", "") ?: ""
+        nameB = p.getString("nB", "") ?: ""
+        playersA = parse(p.getString("pA", "") ?: "")
+        playersB = parse(p.getString("pB", "") ?: "")
+        if (nameA.isNotEmpty()) tBat.setText(nameA)
+        if (nameB.isNotEmpty()) tBowl.setText(nameB)
+    }
+
+    private fun showTeams() {
+        fun et(h: String, v: String, multi: Boolean): EditText = EditText(this).apply {
+            hint = h; setText(v)
+            if (multi) {
+                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                minLines = 4
+                gravity = android.view.Gravity.TOP
+            }
+        }
+        val eA = et("Team A பெயர்", nameA, false)
+        val pA = et("Team A வீரர்கள் (ஒரு வரிக்கு ஒரு பெயர்)", playersA.joinToString("\n"), true)
+        val eB = et("Team B பெயர்", nameB, false)
+        val pB = et("Team B வீரர்கள் (ஒரு வரிக்கு ஒரு பெயர்)", playersB.joinToString("\n"), true)
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 12, 24, 12) }
+        box.addView(eA); box.addView(pA); box.addView(eB); box.addView(pB)
+        val sv = ScrollView(this)
+        sv.addView(box)
+        AlertDialog.Builder(this).setTitle("அணிகள்").setView(sv)
+            .setPositiveButton("Save") { _, _ ->
+                nameA = eA.text.toString().trim()
+                nameB = eB.text.toString().trim()
+                playersA = parse(pA.text.toString())
+                playersB = parse(pB.text.toString())
+                prefs().edit()
+                    .putString("nA", nameA).putString("nB", nameB)
+                    .putString("pA", pA.text.toString()).putString("pB", pB.text.toString())
+                    .apply()
+                if (nameA.isNotEmpty()) (if (batIsA) tBat else tBowl).setText(nameA)
+                if (nameB.isNotEmpty()) (if (batIsA) tBowl else tBat).setText(nameB)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun typeName(title: String, onPick: (String) -> Unit) {
+        val et = EditText(this)
+        et.setSingleLine()
+        AlertDialog.Builder(this).setTitle(title).setView(et)
+            .setPositiveButton("OK") { _, _ ->
+                val t = et.text.toString().trim()
+                if (t.isNotEmpty()) onPick(t)
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun pick(title: String, opts: List<String>, onPick: (String) -> Unit) {
+        val items = (opts + "✎ பெயர் தட்டச்சு").toTypedArray()
+        AlertDialog.Builder(this).setTitle(title)
+            .setItems(items) { _, i ->
+                if (i < opts.size) onPick(opts[i]) else typeName(title, onPick)
+            }
+            .show()
+    }
+
+    private fun pickBatter(slot: Int, after: () -> Unit) {
+        val other = nm(if (slot == 0) b2 else b1, "")
+        val opts = batPlayers().filter { it !in st.outs && it != other }
+        pick(if (slot == 0) "Batter 1" else "Batter 2", opts) { name ->
+            (if (slot == 0) b1 else b2).setText(name)
+            after()
+        }
+    }
+
+    private fun pickBowler() {
+        val opts = bowlPlayers().filter { it != st.lastBowler }
+        pick("Bowler", opts) { name -> bowler.setText(name) }
+    }
+
+    private fun askOut() {
+        val n1 = nm(b1, "Batter 1"); val n2 = nm(b2, "Batter 2")
+        val items = arrayOf(n1 + (if (st.strike == 0) "*" else ""), n2 + (if (st.strike == 1) "*" else ""))
+        AlertDialog.Builder(this).setTitle("யார் அவுட்?")
+            .setItems(items) { _, i -> ball("w", 0, i) }
+            .show()
+    }
+
+    private fun confirmSwap() {
+        AlertDialog.Builder(this).setTitle("Innings மாற்றவா?").setMessage("ஸ்கோர் பூஜ்ஜியமாகும்.")
+            .setPositiveButton("ஆம்") { _, _ ->
+                val a = tBat.text.toString()
+                tBat.setText(tBowl.text.toString())
+                tBowl.setText(a)
+                batIsA = !batIsA
+                st = St()
+                hist.clear()
+                b1.setText("Batter 1"); b2.setText("Batter 2"); bowler.setText("Bowler")
+                refresh()
+                pickBatter(0) { pickBatter(1) { pickBowler() } }
+            }
+            .setNegativeButton("இல்லை", null)
+            .show()
+    }
+
+    private fun undo() {
+        if (hist.isEmpty()) return
+        val s = hist.removeAt(hist.size - 1)
+        st = s
+        if (s.n1.isNotEmpty()) b1.setText(s.n1)
+        if (s.n2.isNotEmpty()) b2.setText(s.n2)
+        if (s.bn.isNotEmpty()) bowler.setText(s.bn)
+        refresh()
+    }
+
+    // ---------- camera ----------
 
     private fun hasPerms(): Boolean =
         ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED &&
@@ -160,14 +307,17 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         startCam()
     }
 
+    // ---------- scoring ----------
+
     private fun nm(e: EditText, d: String) = e.text.toString().trim().ifEmpty { d }
 
-    private fun ball(kind: String, r: Int = 0) {
+    private fun ball(kind: String, r: Int = 0, outSlot: Int = 0) {
         val n1 = nm(b1, "Batter 1"); val n2 = nm(b2, "Batter 2"); val bn = nm(bowler, "Bowler")
         val sn = if (st.strike == 0) n1 else n2
         var runs = st.runs; var wk = st.wk; var legal = st.legal; var strike = st.strike
         val bat = st.bat.toMutableMap(); val bw = st.bowl.toMutableMap()
         val sb = bat[sn] ?: BS(); val bb = bw[bn] ?: BW()
+        var outs = st.outs
         var label = ""
         when (kind) {
             "run" -> {
@@ -184,16 +334,19 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
                 bat[sn] = BS(sb.r, sb.b + 1)
                 bw[bn] = BW(bb.balls + 1, bb.runs, bb.w + 1)
                 label = "W"
-                toast("புதிய batter பெயரை மாற்றுங்கள்")
+                outs = outs + (if (outSlot == 0) n1 else n2)
             }
         }
-        if ((kind == "run" || kind == "w") && legal % 6 == 0) {
-            strike = 1 - strike
-            toast("ஓவர் முடிந்தது: bowler பெயரை மாற்றுங்கள்")
-        }
-        hist.add(st)
-        st = St(runs, wk, legal, strike, bat, bw, (st.last + label).takeLast(6))
+        val overEnded = (kind == "run" || kind == "w") && legal % 6 == 0
+        if (overEnded) strike = 1 - strike
+        hist.add(st.copy(n1 = n1, n2 = n2, bn = bn))
+        st = St(runs, wk, legal, strike, bat, bw, (st.last + label).takeLast(6), outs, if (overEnded) bn else st.lastBowler)
         refresh()
+        if (kind == "w") {
+            pickBatter(outSlot) { if (overEnded) pickBowler() }
+        } else if (overEnded) {
+            pickBowler()
+        }
     }
 
     private fun refresh() {
@@ -283,6 +436,8 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         fit(c, nm(tBowl, "TEAM B").uppercase(), 1160f, top + 42f, 92f, p)
         return bmp
     }
+
+    // ---------- recording & live ----------
 
     private fun newRecFile(): File {
         val dir = getExternalFilesDir(Environment.DIRECTORY_MOVIES)
