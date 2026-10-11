@@ -9,6 +9,7 @@ import android.graphics.*
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.SystemClock
 import android.provider.MediaStore
 import android.text.InputType
 import android.view.SurfaceHolder
@@ -37,11 +38,13 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         val last: List<String> = emptyList(),
         val outs: Set<String> = emptySet(), val lastBowler: String = "",
         val fh: Boolean = false, val extras: Int = 0,
+        val pr: Int = 0, val pb: Int = 0, val fow: List<String> = emptyList(),
         val n1: String = "", val n2: String = "", val bn: String = ""
     )
     data class Inn(
         val team: String, val runs: Int, val wk: Int, val legal: Int,
-        val bat: Map<String, BS>, val outs: Set<String>, val bowl: Map<String, BW>
+        val bat: Map<String, BS>, val outs: Set<String>, val bowl: Map<String, BW>,
+        val fow: List<String>
     )
 
     private var st = St()
@@ -78,10 +81,14 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
     private var resultText = ""
     private var cardPage = 0
 
+    private var recStartMs = 0L
+    private val marks = ArrayList<String>()
+
     private var animType = ""
+    private var animWord = ""
     private var animSub = ""
     private var animStart = 0L
-    private val animMs = 2200L
+    private var animMs = 2200L
     private val animRunner = object : Runnable {
         override fun run() {
             if (animType.isEmpty()) return
@@ -144,19 +151,8 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         b1.setOnClickListener { pickBatter(0) {} }
         b2.setOnClickListener { pickBatter(1) {} }
         bowler.setOnClickListener { pickBowler() }
-        val teamsBtn = Button(this).apply { text = "TEAMS"; textSize = 12f; setOnClickListener { showTeams() } }
-        val matchBtn = Button(this).apply { text = "MATCH"; textSize = 12f; setOnClickListener { showMatch() } }
-        val swapBtn = Button(this).apply { text = "SWAP"; textSize = 12f; setOnClickListener { confirmSwap() } }
-        val cardBtn = Button(this).apply {
-            text = "CARD"; textSize = 12f
-            setOnClickListener { cardPage = if (cardPage == 0) 1 else 0; refresh() }
-        }
         val row2 = LinearLayout(this)
         row2.addView(b1, lp(1f)); row2.addView(b2, lp(1f)); row2.addView(bowler, lp(1f))
-        row2.addView(teamsBtn, LinearLayout.LayoutParams(-2, -2))
-        row2.addView(matchBtn, LinearLayout.LayoutParams(-2, -2))
-        row2.addView(swapBtn, LinearLayout.LayoutParams(-2, -2))
-        row2.addView(cardBtn, LinearLayout.LayoutParams(-2, -2))
         top.addView(row2)
 
         val row3 = LinearLayout(this)
@@ -173,6 +169,18 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         btn("W") { askOut() }
         btn("Undo") { undo() }
         top.addView(row3)
+
+        val row4 = LinearLayout(this)
+        fun btn4(t: String, a: () -> Unit) {
+            row4.addView(Button(this).apply { text = t; textSize = 12f; setPadding(0, 0, 0, 0); setOnClickListener { a() } }, lp(1f))
+        }
+        btn4("TOSS") { showToss() }
+        btn4("TEAMS") { showTeams() }
+        btn4("MATCH") { showMatch() }
+        btn4("SWAP") { confirmSwap() }
+        btn4("CARD") { cardPage = if (cardPage == 0) 1 else 0; refresh() }
+        btn4("★ MARK") { mark("MANUAL", true) }
+        top.addView(row4)
 
         root.addView(top, FrameLayout.LayoutParams(-1, -2, android.view.Gravity.TOP))
         setContentView(root)
@@ -313,7 +321,25 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         choose("யார் அவுட்?", items) { cb(it) }
     }
 
-    private fun snap() = Inn(nm(tBat, "TEAM A"), st.runs, st.wk, st.legal, st.bat, st.outs, st.bowl)
+    private fun snap() = Inn(nm(tBat, "TEAM A"), st.runs, st.wk, st.legal, st.bat, st.outs, st.bowl, st.fow)
+
+    private fun showToss() {
+        if (innings != 1 || st.legal > 0) { toast("Toss போட்டி தொடக்கத்தில் மட்டுமே"); return }
+        val a = nm(tBat, "TEAM A"); val b = nm(tBowl, "TEAM B")
+        choose("Toss வென்றது யார்?", listOf(a, b)) { w ->
+            choose("தேர்வு", listOf("BAT", "BOWL")) { d ->
+                val winner = if (w == 0) a else b
+                val batIdx = if (d == 0) w else 1 - w
+                if (batIdx == 1) {
+                    tBat.setText(b)
+                    tBowl.setText(a)
+                    batIsA = !batIsA
+                }
+                startAnim("TOSS", "TOSS", winner.uppercase() + " WON - ELECTED TO " + (if (d == 0) "BAT" else "BOWL"), 4200L)
+                pickBatter(0) { pickBatter(1) { pickBowler() } }
+            }
+        }
+    }
 
     private fun confirmSwap() {
         val msg = if (innings == 1) "ஸ்கோர் பூஜ்ஜியமாகும். இலக்கு: ${st.runs + 1}" else "புதிய போட்டி தொடங்கும். ஸ்கோர் பூஜ்ஜியமாகும்."
@@ -353,6 +379,19 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         if (s.n2.isNotEmpty()) b2.setText(s.n2)
         if (s.bn.isNotEmpty()) bowler.setText(s.bn)
         refresh()
+    }
+
+    // ---------- highlight markers ----------
+
+    private fun mark(label: String, manual: Boolean = false) {
+        if (!cam.isRecording) {
+            if (manual) toast("பதிவு (REC/Live) நடக்கும்போது மட்டுமே குறிக்க முடியும்")
+            return
+        }
+        val sec = ((SystemClock.elapsedRealtime() - recStartMs) / 1000).toInt().coerceAtLeast(0)
+        val ts = String.format(Locale.US, "%02d:%02d:%02d", sec / 3600, (sec % 3600) / 60, sec % 60)
+        marks.add("$ts  $label  [${nm(tBat, "TEAM A")} ${st.runs}-${st.wk} (${ov(st.legal)})]")
+        if (manual) toast("★ $ts")
     }
 
     // ---------- match result ----------
@@ -448,6 +487,12 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
 
     private fun nm(e: EditText, d: String) = e.text.toString().trim().ifEmpty { d }
 
+    private fun crossed(old: Int, new: Int, step: Int): Int {
+        val a = old / step
+        val b = new / step
+        return if (b > a) b * step else 0
+    }
+
     private fun deliver(
         legal: Boolean, label: String,
         batRuns: Int = 0, extra: Int = 0, bowlerRuns: Int = 0, cross: Int = 0,
@@ -458,31 +503,59 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         cardPage = 0
         val n1 = nm(b1, "Batter 1"); val n2 = nm(b2, "Batter 2"); val bn = nm(bowler, "Bowler")
         val sn = if (st.strike == 0) n1 else n2
+        val oldRuns = st.runs
         val bat = st.bat.toMutableMap(); val bw = st.bowl.toMutableMap()
         val sb = bat[sn] ?: BS(); val bb = bw[bn] ?: BW()
         if (faced || batRuns > 0) bat[sn] = BS(sb.r + batRuns, sb.b + (if (faced) 1 else 0))
         bw[bn] = BW(bb.balls + (if (legal) 1 else 0), bb.runs + bowlerRuns, bb.w + (if (wk != null && credit) 1 else 0))
         val newLegal = st.legal + (if (legal) 1 else 0)
+        val newRuns = st.runs + batRuns + extra
+        val newWk = st.wk + (if (wk != null) 1 else 0)
         var strike = st.strike
         if (cross % 2 == 1) strike = 1 - strike
         val overEnded = legal && newLegal % 6 == 0
         if (overEnded) strike = 1 - strike
-        val outs = if (wk != null) st.outs + (if (outSlot == 0) n1 else n2) else st.outs
+        val outName = if (outSlot == 0) n1 else n2
+        val outs = if (wk != null) st.outs + outName else st.outs
         val fh = if (setFH) true else if (legal) false else st.fh
+        var pr = st.pr + batRuns + extra
+        var pb = st.pb + (if (legal) 1 else 0)
+        var fow = st.fow
+        if (wk != null) {
+            fow = fow + "$newWk-$newRuns ($outName, ${ov(newLegal)})"
+            pr = 0
+            pb = 0
+        }
         hist.add(st.copy(n1 = n1, n2 = n2, bn = bn))
         st = St(
-            st.runs + batRuns + extra, st.wk + (if (wk != null) 1 else 0), newLegal, strike,
+            newRuns, newWk, newLegal, strike,
             bat, bw, (st.last + label).takeLast(6), outs, if (overEnded) bn else st.lastBowler,
-            fh, st.extras + extra
+            fh, st.extras + extra, pr, pb, fow
         )
         refresh()
 
+        val bNew = bat[sn]?.r ?: 0
+        val bm = if (batRuns > 0) crossed(sb.r, bNew, 50) else 0
+        val tm = crossed(oldRuns, newRuns, 50)
         if (wk != null) {
-            startAnim("WICKET", (if (outSlot == 0) n1 else n2).uppercase() + "  -  " + wk.uppercase())
-        } else if (batRuns == 4) {
-            startAnim("FOUR", sn.uppercase())
+            startAnim("WICKET", "WICKET!", outName.uppercase() + "  -  " + wk.uppercase())
+            mark("WICKET - $outName")
+        } else if (bm >= 50) {
+            if (bm == 50) {
+                startAnim("FIFTY", "FIFTY", sn.uppercase() + "  50 (" + bNewBalls(bat, sn) + ")")
+                mark("FIFTY - $sn")
+            } else {
+                startAnim("CENTURY", if (bm == 100) "CENTURY" else "$bm", sn.uppercase() + "  $bm (" + bNewBalls(bat, sn) + ")")
+                mark("$bm - $sn")
+            }
         } else if (batRuns == 6) {
-            startAnim("SIX", sn.uppercase())
+            startAnim("SIX", "SIX", sn.uppercase())
+            mark("SIX - $sn")
+        } else if (batRuns == 4) {
+            startAnim("FOUR", "FOUR", sn.uppercase())
+            mark("FOUR - $sn")
+        } else if (tm >= 50) {
+            startAnim("TEAM", "TEAM $tm", nm(tBat, "TEAM A").uppercase() + "  $tm UP")
         }
 
         val chased = innings == 2 && target > 0 && st.runs >= target
@@ -499,6 +572,8 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
             pickBowler()
         }
     }
+
+    private fun bNewBalls(bat: Map<String, BS>, n: String): Int = bat[n]?.b ?: 0
 
     // ---------- camera ----------
 
@@ -551,9 +626,11 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         }
     }
 
-    private fun startAnim(type: String, sub: String) {
+    private fun startAnim(type: String, word: String, sub: String, ms: Long = 2200L) {
         animType = type
+        animWord = word
         animSub = sub
+        animMs = ms
         animStart = System.currentTimeMillis()
         glView.removeCallbacks(animRunner)
         glView.post(animRunner)
@@ -570,17 +647,21 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
 
     private fun drawAnim(c: Canvas) {
         val t = (System.currentTimeMillis() - animStart).toFloat()
-        val f = clamp01(t / animMs)
-        val inP = clamp01(f / 0.2f)
-        val outP = clamp01((f - 0.8f) / 0.2f)
+        val dur = animMs.toFloat()
+        val f = clamp01(t / dur)
+        val inP = clamp01(t / 450f)
+        val outP = clamp01((t - (dur - 450f)) / 450f)
         val a = 1f - outP
         val accent = when (animType) {
             "FOUR" -> 0xFF29B6F6.toInt()
             "SIX" -> 0xFFFFC107.toInt()
+            "FIFTY" -> 0xFF66BB6A.toInt()
+            "CENTURY" -> 0xFFFF7043.toInt()
+            "TEAM" -> 0xFF26C6DA.toInt()
+            "TOSS" -> 0xFFFFC107.toInt()
             else -> 0xFFE53935.toInt()
         }
         val bg = if (animType == "WICKET") 0xFF4A0D0D.toInt() else 0xFF0B1F3A.toInt()
-        val word = when (animType) { "FOUR" -> "FOUR"; "SIX" -> "SIX"; else -> "WICKET!" }
         val q = Paint(Paint.ANTI_ALIAS_FLAG)
         q.typeface = Typeface.DEFAULT_BOLD
         val cx = 640f
@@ -591,7 +672,14 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         q.color = accent; q.alpha = (45 * a).toInt()
         c.drawRect(0f, 0f, 1280f, 720f, q)
 
-        val rays = when (animType) { "SIX" -> 28; "FOUR" -> 18; else -> 12 }
+        val rays = when (animType) {
+            "SIX" -> 28
+            "CENTURY" -> 32
+            "FIFTY" -> 24
+            "FOUR" -> 18
+            "TOSS" -> 16
+            else -> 12
+        }
         q.style = Paint.Style.STROKE
         q.strokeWidth = 10f
         q.strokeCap = Paint.Cap.ROUND
@@ -616,13 +704,14 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
 
         q.textAlign = Paint.Align.CENTER
         q.textSize = 140f * grow.coerceAtLeast(0.1f)
+        while (q.measureText(animWord) > 1150f && q.textSize > 40f) q.textSize -= 6f
         q.style = Paint.Style.STROKE
         q.strokeWidth = 8f
         q.color = accent; q.alpha = (255 * a).toInt()
-        c.drawText(word, cx, cy + 35f, q)
+        c.drawText(animWord, cx, cy + 35f, q)
         q.style = Paint.Style.FILL
         q.color = Color.WHITE; q.alpha = (255 * a).toInt()
-        c.drawText(word, cx, cy + 35f, q)
+        c.drawText(animWord, cx, cy + 35f, q)
 
         var s = animSub
         q.textSize = 34f
@@ -633,10 +722,27 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
 
     private fun ov(b: Int) = "${b / 6}.${b % 6}"
 
+    private fun crr(): String =
+        if (st.legal == 0) "0.00" else String.format(Locale.US, "%.2f", st.runs * 6.0 / st.legal)
+
+    private fun rrr(need: Int, left: Int): String =
+        String.format(Locale.US, "%.2f", need * 6.0 / left)
+
     private fun fit(c: Canvas, t: String, x: Float, y: Float, maxW: Float, p: Paint) {
         var s = t
         while (s.length > 1 && p.measureText(s) > maxW) s = s.dropLast(1)
         c.drawText(s, x, y, p)
+    }
+
+    private fun pill(c: Canvas, p: Paint, text: String, x: Float, y1: Float, fg: Int): Float {
+        p.textAlign = Paint.Align.LEFT
+        p.textSize = 24f
+        val tw = p.measureText(text)
+        p.color = 0xF00B1F3A.toInt()
+        c.drawRoundRect(x, y1, x + tw + 24f, y1 + 36f, 8f, 8f, p)
+        p.color = fg
+        c.drawText(text, x + 12f, y1 + 27f, p)
+        return x + tw + 24f + 10f
     }
 
     private fun drawInnings(c: Canvas, p: Paint, inn: Inn, x: Float, w: Float, y0: Float) {
@@ -674,6 +780,23 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
             y += 25f
         }
         p.textAlign = Paint.Align.LEFT
+        if (inn.fow.isNotEmpty()) {
+            p.textSize = 16f; p.color = gold
+            c.drawText("FALL OF WICKETS", x, 648f, p)
+            p.textSize = 17f; p.color = Color.LTGRAY
+            val lines = ArrayList<String>()
+            var cur = ""
+            for (tok in inn.fow) {
+                val nxt = if (cur.isEmpty()) tok else "$cur   $tok"
+                if (p.measureText(nxt) > w && cur.isNotEmpty()) { lines.add(cur); cur = tok } else cur = nxt
+            }
+            if (cur.isNotEmpty()) lines.add(cur)
+            var ly = 668f
+            for (ln in lines.take(3)) {
+                c.drawText(ln, x, ly, p)
+                ly += 21f
+            }
+        }
     }
 
     private fun drawCard(c: Canvas, p: Paint) {
@@ -728,22 +851,21 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         val n1 = nm(b1, "Batter 1"); val n2 = nm(b2, "Batter 2"); val bn = nm(bowler, "Bowler")
         val top = 640f; val bot = 704f
 
+        var px = 20f
         val lb = st.last.joinToString(" ")
-        if (lb.isNotEmpty()) {
-            p.textSize = 24f
-            val tw = p.measureText(lb)
-            p.color = navy; c.drawRoundRect(20f, top - 44f, 20f + tw + 24f, top - 8f, 8f, 8f, p)
-            p.color = Color.WHITE; c.drawText(lb, 32f, top - 17f, p)
-        }
+        if (lb.isNotEmpty()) px = pill(c, p, lb, px, top - 44f, Color.WHITE)
+        pill(c, p, "CRR " + crr(), px, top - 44f, gold)
+        if (st.pb > 0) pill(c, p, "P'SHIP ${st.pr} (${st.pb})", 20f, top - 90f, Color.WHITE)
 
         if (innings == 2 && target > 0) {
             val need = target - st.runs
             val left = totalOvers * 6 - st.legal
-            val t = if (need <= 0) "TARGET $target - REACHED" else "TARGET $target  Need $need off $left"
+            val t = if (need <= 0) "TARGET $target - REACHED"
+            else if (left > 0) "TARGET $target  NEED $need OFF $left  RRR ${rrr(need, left)}"
+            else "TARGET $target  NEED $need"
             p.textSize = 24f
             val tw = p.measureText(t)
-            p.color = navy; c.drawRoundRect(1260f - tw - 24f, top - 44f, 1260f, top - 8f, 8f, 8f, p)
-            p.color = gold; c.drawText(t, 1260f - tw - 12f, top - 17f, p)
+            pill(c, p, t, 1260f - tw - 24f, top - 44f, gold)
         }
 
         p.color = navy; c.drawRect(20f, top, 1260f, bot, p)
@@ -801,6 +923,8 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
     private fun finishRecording() {
         val f = recFile ?: return
         recFile = null
+        val ms = ArrayList(marks)
+        marks.clear()
         if (Build.VERSION.SDK_INT < 29) { toast("பதிவு: ${f.absolutePath}"); return }
         toast("பதிவை Gallery-க்கு நகர்த்துகிறது... காத்திருக்கவும்")
         Thread {
@@ -824,6 +948,21 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
             } catch (e: Exception) {
                 toast("நகர்த்த முடியவில்லை. கோப்பு: ${f.absolutePath}")
             }
+            if (ms.isNotEmpty()) {
+                try {
+                    val tv = ContentValues().apply {
+                        put(MediaStore.MediaColumns.DISPLAY_NAME, f.nameWithoutExtension + "_highlights.txt")
+                        put(MediaStore.MediaColumns.MIME_TYPE, "text/plain")
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, "Download/RawCricket")
+                    }
+                    val turi = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, tv)
+                        ?: throw Exception("insert failed")
+                    contentResolver.openOutputStream(turi)?.use { it.write(ms.joinToString("\n").toByteArray()) }
+                    toast("★ ${ms.size} highlight குறிப்புகள்: Download/RawCricket")
+                } catch (e: Exception) {
+                    toast("Highlight கோப்பு சேமிக்க முடியவில்லை")
+                }
+            }
         }.start()
     }
 
@@ -842,6 +981,8 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
                 val f = newRecFile()
                 recFile = f
                 cam.startRecord(f.absolutePath)
+                recStartMs = SystemClock.elapsedRealtime()
+                marks.clear()
                 recBtn.text = "STOP REC"
                 installFilterSoon()
             } else toast("Camera/Audio தயாராகவில்லை")
@@ -867,7 +1008,11 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
             if (cam.prepareAudio() && cam.prepareVideo(1280, 720, 30, 2500 * 1000, 0)) {
                 val f = newRecFile()
                 recFile = f
-                try { cam.startRecord(f.absolutePath) } catch (e: Exception) { recFile = null; toast("Recording தொடங்கவில்லை") }
+                try {
+                    cam.startRecord(f.absolutePath)
+                    recStartMs = SystemClock.elapsedRealtime()
+                    marks.clear()
+                } catch (e: Exception) { recFile = null; toast("Recording தொடங்கவில்லை") }
                 cam.startStream(target2)
                 liveBtn.text = "STOP"
                 installFilterSoon()
