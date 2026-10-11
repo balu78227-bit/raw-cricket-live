@@ -78,6 +78,23 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
     private var resultText = ""
     private var cardPage = 0
 
+    private var animType = ""
+    private var animSub = ""
+    private var animStart = 0L
+    private val animMs = 2200L
+    private val animRunner = object : Runnable {
+        override fun run() {
+            if (animType.isEmpty()) return
+            if (System.currentTimeMillis() - animStart >= animMs) {
+                animType = ""
+                refresh()
+                return
+            }
+            refresh()
+            glView.postDelayed(this, 80)
+        }
+    }
+
     private val logo: Bitmap? by lazy {
         try {
             val id = resources.getIdentifier("logo", "drawable", packageName)
@@ -132,7 +149,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         val swapBtn = Button(this).apply { text = "SWAP"; textSize = 12f; setOnClickListener { confirmSwap() } }
         val cardBtn = Button(this).apply {
             text = "CARD"; textSize = 12f
-            setOnClickListener { cardPage = (cardPage + 1) % 3; refresh() }
+            setOnClickListener { cardPage = if (cardPage == 0) 1 else 0; refresh() }
         }
         val row2 = LinearLayout(this)
         row2.addView(b1, lp(1f)); row2.addView(b2, lp(1f)); row2.addView(bowler, lp(1f))
@@ -311,6 +328,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
                     target = 0; innings = 1
                 }
                 cardPage = 0
+                animType = ""
                 val a = tBat.text.toString()
                 tBat.setText(tBowl.text.toString())
                 tBowl.setText(a)
@@ -329,6 +347,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         if (hist.isEmpty()) return
         val s = hist.removeAt(hist.size - 1)
         st = s
+        animType = ""
         if (matchOver) { matchOver = false; inn2 = null; resultText = ""; cardPage = 0 }
         if (s.n1.isNotEmpty()) b1.setText(s.n1)
         if (s.n2.isNotEmpty()) b2.setText(s.n2)
@@ -355,6 +374,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
             }
         }
         cardPage = 1
+        animType = ""
         refresh()
         toast(resultText)
     }
@@ -457,6 +477,14 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         )
         refresh()
 
+        if (wk != null) {
+            startAnim("WICKET", (if (outSlot == 0) n1 else n2).uppercase() + "  -  " + wk.uppercase())
+        } else if (batRuns == 4) {
+            startAnim("FOUR", sn.uppercase())
+        } else if (batRuns == 6) {
+            startAnim("SIX", sn.uppercase())
+        }
+
         val chased = innings == 2 && target > 0 && st.runs >= target
         val allOut = st.wk >= maxWk()
         val oversDone = st.legal >= totalOvers * 6
@@ -515,12 +543,92 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         startCam()
     }
 
-    // ---------- overlay ----------
+    // ---------- overlay & animation ----------
 
     private fun refresh() {
         if (filterSet) {
             try { filter.setImage(drawOverlay()) } catch (e: Exception) {}
         }
+    }
+
+    private fun startAnim(type: String, sub: String) {
+        animType = type
+        animSub = sub
+        animStart = System.currentTimeMillis()
+        glView.removeCallbacks(animRunner)
+        glView.post(animRunner)
+    }
+
+    private fun clamp01(x: Float) = if (x < 0f) 0f else if (x > 1f) 1f else x
+
+    private fun easeOutBack(x: Float): Float {
+        val c1 = 1.70158f
+        val c3 = c1 + 1f
+        val t = x - 1f
+        return 1f + c3 * t * t * t + c1 * t * t
+    }
+
+    private fun drawAnim(c: Canvas) {
+        val t = (System.currentTimeMillis() - animStart).toFloat()
+        val f = clamp01(t / animMs)
+        val inP = clamp01(f / 0.2f)
+        val outP = clamp01((f - 0.8f) / 0.2f)
+        val a = 1f - outP
+        val accent = when (animType) {
+            "FOUR" -> 0xFF29B6F6.toInt()
+            "SIX" -> 0xFFFFC107.toInt()
+            else -> 0xFFE53935.toInt()
+        }
+        val bg = if (animType == "WICKET") 0xFF4A0D0D.toInt() else 0xFF0B1F3A.toInt()
+        val word = when (animType) { "FOUR" -> "FOUR"; "SIX" -> "SIX"; else -> "WICKET!" }
+        val q = Paint(Paint.ANTI_ALIAS_FLAG)
+        q.typeface = Typeface.DEFAULT_BOLD
+        val cx = 640f
+        val cy = 290f
+        val grow = easeOutBack(inP)
+
+        q.style = Paint.Style.FILL
+        q.color = accent; q.alpha = (45 * a).toInt()
+        c.drawRect(0f, 0f, 1280f, 720f, q)
+
+        val rays = when (animType) { "SIX" -> 28; "FOUR" -> 18; else -> 12 }
+        q.style = Paint.Style.STROKE
+        q.strokeWidth = 10f
+        q.strokeCap = Paint.Cap.ROUND
+        q.color = accent; q.alpha = (200 * a).toInt()
+        for (i in 0 until rays) {
+            val ang = Math.PI * 2 * i / rays + f * 0.6
+            val r1 = 150f + 120f * grow
+            val r2 = r1 + 120f + 260f * inP
+            c.drawLine(
+                cx + (Math.cos(ang) * r1).toFloat(), cy + (Math.sin(ang) * r1).toFloat(),
+                cx + (Math.cos(ang) * r2).toFloat(), cy + (Math.sin(ang) * r2).toFloat(), q
+            )
+        }
+
+        q.style = Paint.Style.FILL
+        val hh = 120f * grow.coerceAtMost(1.05f)
+        q.color = bg; q.alpha = (235 * a).toInt()
+        c.drawRect(0f, cy - hh, 1280f, cy + hh, q)
+        q.color = accent; q.alpha = (255 * a).toInt()
+        c.drawRect(0f, cy - hh - 6f, 1280f, cy - hh, q)
+        c.drawRect(0f, cy + hh, 1280f, cy + hh + 6f, q)
+
+        q.textAlign = Paint.Align.CENTER
+        q.textSize = 140f * grow.coerceAtLeast(0.1f)
+        q.style = Paint.Style.STROKE
+        q.strokeWidth = 8f
+        q.color = accent; q.alpha = (255 * a).toInt()
+        c.drawText(word, cx, cy + 35f, q)
+        q.style = Paint.Style.FILL
+        q.color = Color.WHITE; q.alpha = (255 * a).toInt()
+        c.drawText(word, cx, cy + 35f, q)
+
+        var s = animSub
+        q.textSize = 34f
+        while (s.length > 1 && q.measureText(s) > 1100f) s = s.dropLast(1)
+        q.color = accent; q.alpha = (255 * a * clamp01((inP - 0.5f) * 2f)).toInt()
+        c.drawText(s, cx, cy + 98f, q)
     }
 
     private fun ov(b: Int) = "${b / 6}.${b % 6}"
@@ -568,57 +676,6 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         p.textAlign = Paint.Align.LEFT
     }
 
-    private fun drawMvp(c: Canvas, p: Paint, list: List<Inn>) {
-        class PS(var r: Int = 0, var b: Int = 0, var w: Int = 0, var rc: Int = 0, var bl: Int = 0)
-        val gold = 0xFFFFC107.toInt()
-        val m = mutableMapOf<String, PS>()
-        for (inn in list) {
-            for ((n, s) in inn.bat) { val q = m.getOrPut(n) { PS() }; q.r += s.r; q.b += s.b }
-            for ((n, b) in inn.bowl) { val q = m.getOrPut(n) { PS() }; q.w += b.w; q.rc += b.runs; q.bl += b.balls }
-        }
-        val rows = m.entries.sortedByDescending { it.value.r + 20 * it.value.w }.take(9)
-        p.textAlign = Paint.Align.LEFT
-        if (rows.isEmpty()) {
-            p.color = Color.WHITE; p.textSize = 30f
-            c.drawText("இன்னும் தரவு இல்லை", 30f, 160f, p)
-            return
-        }
-        val first = rows[0]
-        p.color = gold; p.textSize = 34f
-        fit(c, "MVP - ${first.key.uppercase()}  (${first.value.r + 20 * first.value.w} pts)", 30f, 130f, 1220f, p)
-
-        p.textSize = 20f; p.color = Color.LTGRAY
-        c.drawText("#", 30f, 178f, p)
-        c.drawText("PLAYER", 80f, 178f, p)
-        p.textAlign = Paint.Align.RIGHT
-        c.drawText("BAT", 800f, 178f, p)
-        c.drawText("BOWL", 1030f, 178f, p)
-        c.drawText("POINTS", 1250f, 178f, p)
-
-        var y = 225f
-        for ((i, e) in rows.withIndex()) {
-            val q = e.value
-            if (i % 2 == 0) {
-                p.color = 0x22FFFFFF
-                c.drawRect(30f, y - 33f, 1250f, y + 12f, p)
-            }
-            p.textSize = 28f
-            p.textAlign = Paint.Align.LEFT
-            p.color = if (i == 0) gold else Color.WHITE
-            c.drawText("${i + 1}", 30f, y, p)
-            fit(c, e.key, 80f, y, 450f, p)
-            p.textAlign = Paint.Align.RIGHT
-            c.drawText(if (q.b > 0 || q.r > 0) "${q.r} (${q.b})" else "-", 800f, y, p)
-            c.drawText(if (q.bl > 0) "${q.w}-${q.rc} (${ov(q.bl)})" else "-", 1030f, y, p)
-            p.color = gold
-            c.drawText("${q.r + 20 * q.w}", 1250f, y, p)
-            y += 48f
-        }
-        p.textAlign = Paint.Align.LEFT
-        p.textSize = 18f; p.color = Color.LTGRAY
-        c.drawText("Points = Runs + 20 x Wickets", 30f, 700f, p)
-    }
-
     private fun drawCard(c: Canvas, p: Paint) {
         val gold = 0xFFFFC107.toInt()
         p.color = 0xFA0B1F3A.toInt(); c.drawRect(0f, 0f, 1280f, 720f, p)
@@ -633,11 +690,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         p.textAlign = Paint.Align.LEFT
         p.color = gold; c.drawRect(30f, 78f, 1250f, 81f, p)
         val list = cards()
-        if (cardPage == 1) {
-            for (i in list.indices) drawInnings(c, p, list[i], if (i == 0) 30f else 660f, 590f, 100f)
-        } else {
-            drawMvp(c, p, list)
-        }
+        for (i in list.indices) drawInnings(c, p, list[i], if (i == 0) 30f else 660f, 590f, 100f)
     }
 
     private fun drawOverlay(): Bitmap {
@@ -732,6 +785,8 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
 
         p.color = Color.BLACK; p.textSize = 28f
         fit(c, nm(tBowl, "TEAM B").uppercase(), 1160f, top + 42f, 92f, p)
+
+        if (animType.isNotEmpty()) drawAnim(c)
         return bmp
     }
 
