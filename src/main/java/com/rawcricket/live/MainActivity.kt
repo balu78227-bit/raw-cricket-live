@@ -24,6 +24,8 @@ import com.pedro.encoder.input.gl.render.filters.`object`.ImageObjectFilterRende
 import com.pedro.encoder.utils.gl.TranslateTo
 import com.pedro.library.rtmp.RtmpCamera2
 import com.pedro.library.view.OpenGlView
+import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
@@ -72,6 +74,11 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
     private var totalOvers = 10
     private var maxPerBowler = 0
     private var freeHitOn = true
+    private var nsOn = true
+    private var recQ = 1080
+    private var liveQ = 720
+    private var encW = 1280
+    private var encH = 720
     private var innings = 1
     private var target = 0
 
@@ -83,6 +90,19 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
 
     private var recStartMs = 0L
     private val marks = ArrayList<String>()
+
+    private var wantLive = false
+    private var wantRec = false
+    private var connected = false
+    private var retryCount = 0
+    private var resumeLive = false
+    private var resumeRec = false
+    private var resuming = false
+    private var restoring = false
+    private var dimOn = false
+
+    private val saver = Runnable { saveState() }
+    private val retryRunner = Runnable { reconnect() }
 
     private var animType = ""
     private var animWord = ""
@@ -98,7 +118,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
                 return
             }
             refresh()
-            glView.postDelayed(this, 80)
+            glView.postDelayed(this, if (encW > 1280) 120L else 80L)
         }
     }
 
@@ -113,7 +133,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         EditText(this).apply {
             hint = h; setText(d); textSize = size; setSingleLine()
             setTextColor(Color.WHITE); setHintTextColor(Color.GRAY)
-            doAfterTextChanged { refresh() }
+            doAfterTextChanged { refresh(); saveSoon() }
         }
 
     private fun lp(w: Float) = LinearLayout.LayoutParams(0, -2, w)
@@ -132,6 +152,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         tBat = field("Batting team", "TEAM A")
         tBowl = field("Bowling team", "TEAM B")
         url = field("Stream URL + key", "", 11f)
+        url.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         liveBtn = Button(this).apply { text = "GO LIVE"; setOnClickListener { toggleLive() } }
         recBtn = Button(this).apply { text = "REC"; setOnClickListener { toggleRec() } }
         val row1 = LinearLayout(this)
@@ -180,12 +201,15 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         btn4("SWAP") { confirmSwap() }
         btn4("CARD") { cardPage = if (cardPage == 0) 1 else 0; refresh() }
         btn4("★ MARK") { mark("MANUAL", true) }
+        btn4("NEW") { newMatch() }
+        btn4("DIM") { toggleDim() }
         top.addView(row4)
 
         root.addView(top, FrameLayout.LayoutParams(-1, -2, android.view.Gravity.TOP))
         setContentView(root)
 
         loadTeams()
+        restoreState()
 
         cam = RtmpCamera2(glView, this)
         glView.holder.addCallback(this)
@@ -196,9 +220,169 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         }
     }
 
-    // ---------- teams, match settings, pickers ----------
+    override fun onPause() {
+        super.onPause()
+        saveState()
+    }
+
+    // ---------- persistence ----------
 
     private fun prefs() = getSharedPreferences("rc", MODE_PRIVATE)
+
+    private fun saveSoon() {
+        if (restoring) return
+        glView.removeCallbacks(saver)
+        glView.postDelayed(saver, 500)
+    }
+
+    private fun batJ(m: Map<String, BS>): JSONObject {
+        val o = JSONObject()
+        for ((k, v) in m) o.put(k, JSONArray().put(v.r).put(v.b))
+        return o
+    }
+
+    private fun bowlJ(m: Map<String, BW>): JSONObject {
+        val o = JSONObject()
+        for ((k, v) in m) o.put(k, JSONArray().put(v.balls).put(v.runs).put(v.w))
+        return o
+    }
+
+    private fun batP(o: JSONObject): Map<String, BS> {
+        val m = LinkedHashMap<String, BS>()
+        val ks = o.keys()
+        while (ks.hasNext()) {
+            val k = ks.next()
+            val a = o.getJSONArray(k)
+            m[k] = BS(a.getInt(0), a.getInt(1))
+        }
+        return m
+    }
+
+    private fun bowlP(o: JSONObject): Map<String, BW> {
+        val m = LinkedHashMap<String, BW>()
+        val ks = o.keys()
+        while (ks.hasNext()) {
+            val k = ks.next()
+            val a = o.getJSONArray(k)
+            m[k] = BW(a.getInt(0), a.getInt(1), a.getInt(2))
+        }
+        return m
+    }
+
+    private fun strL(a: JSONArray): List<String> {
+        val l = ArrayList<String>()
+        for (i in 0 until a.length()) l.add(a.getString(i))
+        return l
+    }
+
+    private fun stJ(s: St): JSONObject {
+        val o = JSONObject()
+        o.put("runs", s.runs); o.put("wk", s.wk); o.put("legal", s.legal); o.put("strike", s.strike)
+        o.put("bat", batJ(s.bat)); o.put("bowl", bowlJ(s.bowl))
+        o.put("last", JSONArray(s.last)); o.put("outs", JSONArray(s.outs.toList()))
+        o.put("lb", s.lastBowler); o.put("fh", s.fh); o.put("ex", s.extras)
+        o.put("pr", s.pr); o.put("pb", s.pb); o.put("fow", JSONArray(s.fow))
+        o.put("n1", s.n1); o.put("n2", s.n2); o.put("bn", s.bn)
+        return o
+    }
+
+    private fun stP(o: JSONObject): St = St(
+        o.getInt("runs"), o.getInt("wk"), o.getInt("legal"), o.getInt("strike"),
+        batP(o.getJSONObject("bat")), bowlP(o.getJSONObject("bowl")),
+        strL(o.getJSONArray("last")), strL(o.getJSONArray("outs")).toSet(), o.getString("lb"),
+        o.getBoolean("fh"), o.getInt("ex"), o.getInt("pr"), o.getInt("pb"),
+        strL(o.getJSONArray("fow")),
+        o.getString("n1"), o.getString("n2"), o.getString("bn")
+    )
+
+    private fun innJ(i: Inn): JSONObject {
+        val o = JSONObject()
+        o.put("team", i.team); o.put("runs", i.runs); o.put("wk", i.wk); o.put("legal", i.legal)
+        o.put("bat", batJ(i.bat)); o.put("outs", JSONArray(i.outs.toList()))
+        o.put("bowl", bowlJ(i.bowl)); o.put("fow", JSONArray(i.fow))
+        return o
+    }
+
+    private fun innP(o: JSONObject): Inn = Inn(
+        o.getString("team"), o.getInt("runs"), o.getInt("wk"), o.getInt("legal"),
+        batP(o.getJSONObject("bat")), strL(o.getJSONArray("outs")).toSet(),
+        bowlP(o.getJSONObject("bowl")), strL(o.getJSONArray("fow"))
+    )
+
+    private fun saveState() {
+        try {
+            val o = JSONObject()
+            o.put("st", stJ(st))
+            val h = JSONArray()
+            for (x in hist.takeLast(60)) h.put(stJ(x))
+            o.put("hist", h)
+            o.put("innings", innings); o.put("target", target)
+            inn1?.let { o.put("inn1", innJ(it)) }
+            inn2?.let { o.put("inn2", innJ(it)) }
+            o.put("over", matchOver); o.put("result", resultText); o.put("batIsA", batIsA)
+            o.put("tBat", tBat.text.toString()); o.put("tBowl", tBowl.text.toString())
+            o.put("b1", b1.text.toString()); o.put("b2", b2.text.toString())
+            o.put("bowler", bowler.text.toString())
+            prefs().edit().putString("state", o.toString()).putString("url", url.text.toString()).apply()
+        } catch (e: Exception) {}
+    }
+
+    private fun restoreState() {
+        restoring = true
+        try {
+            val p = prefs()
+            val u = p.getString("url", "") ?: ""
+            if (u.isNotEmpty()) url.setText(u)
+            val s = p.getString("state", null)
+            if (s != null) {
+                val o = JSONObject(s)
+                st = stP(o.getJSONObject("st"))
+                hist.clear()
+                val h = o.getJSONArray("hist")
+                for (i in 0 until h.length()) hist.add(stP(h.getJSONObject(i)))
+                innings = o.getInt("innings"); target = o.getInt("target")
+                inn1 = if (o.has("inn1")) innP(o.getJSONObject("inn1")) else null
+                inn2 = if (o.has("inn2")) innP(o.getJSONObject("inn2")) else null
+                matchOver = o.getBoolean("over"); resultText = o.getString("result")
+                batIsA = o.getBoolean("batIsA")
+                tBat.setText(o.getString("tBat")); tBowl.setText(o.getString("tBowl"))
+                b1.setText(o.getString("b1")); b2.setText(o.getString("b2"))
+                bowler.setText(o.getString("bowler"))
+                if (st.legal > 0 || st.runs > 0 || hist.isNotEmpty()) toast("ஸ்கோர் மீட்கப்பட்டது")
+            }
+        } catch (e: Exception) {
+            toast("முந்தைய ஸ்கோர் மீட்க முடியவில்லை")
+        }
+        restoring = false
+    }
+
+    private fun newMatch() {
+        AlertDialog.Builder(this).setTitle("புதிய போட்டி?").setMessage("தற்போதைய ஸ்கோர் அழியும்.")
+            .setPositiveButton("ஆம்") { _, _ ->
+                st = St(); hist.clear()
+                innings = 1; target = 0; inn1 = null; inn2 = null
+                matchOver = false; resultText = ""; cardPage = 0; animType = ""
+                batIsA = true
+                tBat.setText(if (nameA.isNotEmpty()) nameA else "TEAM A")
+                tBowl.setText(if (nameB.isNotEmpty()) nameB else "TEAM B")
+                b1.setText("Batter 1"); b2.setText("Batter 2"); bowler.setText("Bowler")
+                refresh()
+                saveState()
+            }
+            .setNegativeButton("இல்லை", null)
+            .show()
+    }
+
+    private fun toggleDim() {
+        dimOn = !dimOn
+        val wa = window.attributes
+        wa.screenBrightness = if (dimOn) 0.05f else WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE
+        window.attributes = wa
+        toast(if (dimOn) "திரை மங்கலாக்கப்பட்டது" else "திரை சாதாரணம்")
+    }
+
+    // ---------- teams, match settings, pickers ----------
+
     private fun parse(s: String) = s.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
     private fun batPlayers() = if (batIsA) playersA else playersB
     private fun bowlPlayers() = if (batIsA) playersB else playersA
@@ -215,6 +399,11 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         totalOvers = p.getInt("ov", 10)
         maxPerBowler = p.getInt("mb", 0)
         freeHitOn = p.getBoolean("fh", true)
+        nsOn = p.getBoolean("ns", true)
+        val qr = p.getInt("qr", 1080)
+        recQ = if (qr == 540 || qr == 720 || qr == 1080) qr else 1080
+        val ql = p.getInt("ql", 720)
+        liveQ = if (ql == 540 || ql == 720) ql else 720
         if (nameA.isNotEmpty()) tBat.setText(nameA)
         if (nameB.isNotEmpty()) tBowl.setText(nameB)
     }
@@ -223,16 +412,46 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         val eO = EditText(this).apply { hint = "மொத்த ஓவர்கள்"; setText("$totalOvers"); inputType = InputType.TYPE_CLASS_NUMBER }
         val eB = EditText(this).apply { hint = "ஒரு bowler-க்கு அதிகபட்ச ஓவர் (0 = தானாக)"; setText("$maxPerBowler"); inputType = InputType.TYPE_CLASS_NUMBER }
         val cb = CheckBox(this).apply { text = "No-ball-க்குப் பின் Free Hit"; isChecked = freeHitOn }
+        val cn = CheckBox(this).apply { text = "ஆடியோ சத்தம் குறைப்பு (Noise suppression)"; isChecked = nsOn }
+
+        val tvR = TextView(this).apply { text = "REC தரம் (மொபைலில் சேமிக்கப்படும் வீடியோ):"; setPadding(0, 16, 0, 0) }
+        val rgR = RadioGroup(this)
+        val optR = listOf(540 to "540p - வெப்பம் குறைவு", 720 to "720p HD", 1080 to "1080p Full HD")
+        for ((q, label) in optR) rgR.addView(RadioButton(this).apply { text = label; id = q })
+        rgR.check(recQ)
+
+        val tvL = TextView(this).apply { text = "Live தரம் (இணையத்தில் பார்ப்பது):"; setPadding(0, 16, 0, 0) }
+        val rgL = RadioGroup(this)
+        val optL = listOf(540 to "540p - குறைந்த data", 720 to "720p HD (பரிந்துரை)")
+        for ((q, label) in optL) rgL.addView(RadioButton(this).apply { text = label; id = 1000 + q })
+        rgL.check(1000 + liveQ)
+
+        val note = TextView(this).apply {
+            text = "குறிப்பு: Live நடக்கும்போது சேமிக்கப்படும் வீடியோவும் Live தரத்திலேயே இருக்கும்."
+            textSize = 12f
+            setPadding(0, 12, 0, 0)
+        }
+
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 12, 24, 12) }
-        box.addView(eO); box.addView(eB); box.addView(cb)
+        box.addView(eO); box.addView(eB); box.addView(cb); box.addView(cn)
+        box.addView(tvR); box.addView(rgR); box.addView(tvL); box.addView(rgL); box.addView(note)
+        val sv = ScrollView(this)
+        sv.addView(box)
         AlertDialog.Builder(this).setTitle("போட்டி விதிகள்")
-            .setMessage("தானாக = மொத்த ஓவர் ÷ 5 (மேல்நோக்கி)")
-            .setView(box)
+            .setView(sv)
             .setPositiveButton("Save") { _, _ ->
                 totalOvers = eO.text.toString().toIntOrNull()?.coerceAtLeast(1) ?: totalOvers
                 maxPerBowler = eB.text.toString().toIntOrNull()?.coerceAtLeast(0) ?: maxPerBowler
                 freeHitOn = cb.isChecked
-                prefs().edit().putInt("ov", totalOvers).putInt("mb", maxPerBowler).putBoolean("fh", freeHitOn).apply()
+                nsOn = cn.isChecked
+                val sr = rgR.checkedRadioButtonId
+                recQ = if (sr == 540 || sr == 720 || sr == 1080) sr else 1080
+                val sl = rgL.checkedRadioButtonId - 1000
+                liveQ = if (sl == 540 || sl == 720) sl else 720
+                prefs().edit().putInt("ov", totalOvers).putInt("mb", maxPerBowler)
+                    .putBoolean("fh", freeHitOn).putBoolean("ns", nsOn)
+                    .putInt("qr", recQ).putInt("ql", liveQ).apply()
+                toast("ஆடியோ/தர மாற்றம் அடுத்த REC/Live-ல் செயல்படும்")
                 refresh()
             }
             .setNegativeButton("Cancel", null)
@@ -363,6 +582,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
                 hist.clear()
                 b1.setText("Batter 1"); b2.setText("Batter 2"); bowler.setText("Bowler")
                 refresh()
+                saveSoon()
                 pickBatter(0) { pickBatter(1) { pickBowler() } }
             }
             .setNegativeButton("இல்லை", null)
@@ -379,6 +599,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         if (s.n2.isNotEmpty()) b2.setText(s.n2)
         if (s.bn.isNotEmpty()) bowler.setText(s.bn)
         refresh()
+        saveSoon()
     }
 
     // ---------- highlight markers ----------
@@ -415,6 +636,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         cardPage = 1
         animType = ""
         refresh()
+        saveSoon()
         toast(resultText)
     }
 
@@ -527,12 +749,14 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
             pb = 0
         }
         hist.add(st.copy(n1 = n1, n2 = n2, bn = bn))
+        if (hist.size > 60) hist.removeAt(0)
         st = St(
             newRuns, newWk, newLegal, strike,
             bat, bw, (st.last + label).takeLast(6), outs, if (overEnded) bn else st.lastBowler,
             fh, st.extras + extra, pr, pb, fow
         )
         refresh()
+        saveSoon()
 
         val bNew = bat[sn]?.r ?: 0
         val bm = if (batRuns > 0) crossed(sb.r, bNew, 50) else 0
@@ -817,9 +1041,12 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
     }
 
     private fun drawOverlay(): Bitmap {
-        val w = 1280; val h = 720
-        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val bw0 = encW
+        val bh0 = encH
+        val bmp = Bitmap.createBitmap(bw0, bh0, Bitmap.Config.ARGB_8888)
         val c = Canvas(bmp)
+        val scl = bw0 / 1280f
+        c.scale(scl, scl)
         val p = Paint(Paint.ANTI_ALIAS_FLAG)
         p.typeface = Typeface.DEFAULT_BOLD
         if (cardPage != 0) {
@@ -966,46 +1193,85 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         }.start()
     }
 
+    private fun fixUrl(raw: String): String {
+        var s = raw.trim().replace(" ", "")
+        if (s.isEmpty()) return s
+        if (!s.contains("://")) return "rtmp://a.rtmp.youtube.com/live2/$s"
+        val m = Regex("^(rtmps?://[^/]+/live2)([^/?].*)$").find(s)
+        if (m != null) s = m.groupValues[1] + "/" + m.groupValues[2]
+        return s
+    }
+
+    private fun dims(q: Int): Pair<Int, Int> = when (q) {
+        540 -> Pair(960, 540)
+        1080 -> Pair(1920, 1080)
+        else -> Pair(1280, 720)
+    }
+
+    private fun kbpsFor(q: Int, live: Boolean): Int = when (q) {
+        540 -> if (live) 1800 else 2200
+        1080 -> if (live) 5000 else 6000
+        else -> if (live) 2500 else 3000
+    }
+
+    private fun prep(live: Boolean): Boolean {
+        val q = if (live) liveQ else recQ
+        val d = dims(q)
+        encW = d.first
+        encH = d.second
+        val audioOk = if (nsOn) cam.prepareAudio(128 * 1024, 44100, false, true, true) else cam.prepareAudio()
+        return audioOk && cam.prepareVideo(encW, encH, 30, kbpsFor(q, live) * 1000, 0)
+    }
+
     private fun toggleRec() {
+        if (cam.isStreaming || wantLive) { toast("Live நடக்கும்போது பதிவு தானாகவே நடக்கிறது (Live தரத்தில்)"); return }
+        if (cam.isRecording) stopRec() else startRec()
+    }
+
+    private fun startRec() {
         try {
-            if (cam.isStreaming) { toast("Live நடக்கும்போது பதிவு தானாகவே நடக்கிறது"); return }
-            if (cam.isRecording) {
-                cam.stopRecord()
-                recBtn.text = "REC"
-                installFilterSoon()
-                finishRecording()
-                return
-            }
+            if (cam.isStreaming || cam.isRecording) return
             if (!hasPerms()) { toast("Camera/Mic அனுமதி தேவை"); return }
-            if (cam.prepareAudio() && cam.prepareVideo(1280, 720, 30, 3000 * 1000, 0)) {
+            if (prep(false)) {
                 val f = newRecFile()
                 recFile = f
                 cam.startRecord(f.absolutePath)
                 recStartMs = SystemClock.elapsedRealtime()
                 marks.clear()
+                wantRec = true
                 recBtn.text = "STOP REC"
                 installFilterSoon()
-            } else toast("Camera/Audio தயாராகவில்லை")
+            } else toast("இந்தத் தரம் ஆதரிக்கப்படவில்லை அல்லது கேமரா தயாராகவில்லை")
+        } catch (e: Exception) {
+            toast("Error: ${e.message}")
+        }
+    }
+
+    private fun stopRec() {
+        try {
+            wantRec = false
+            if (cam.isRecording) { cam.stopRecord(); finishRecording() }
+            recBtn.text = "REC"
+            installFilterSoon()
         } catch (e: Exception) {
             toast("Error: ${e.message}")
         }
     }
 
     private fun toggleLive() {
-        if (cam.isStreaming) {
-            cam.stopStream()
-            if (cam.isRecording) { cam.stopRecord(); finishRecording() }
-            liveBtn.text = "GO LIVE"
-            recBtn.text = "REC"
-            installFilterSoon()
-            return
-        }
+        if (cam.isStreaming || wantLive) stopLive() else startLive()
+    }
+
+    private fun startLive() {
+        if (cam.isStreaming) return
         if (cam.isRecording) { toast("முதலில் REC-ஐ நிறுத்துங்கள்"); return }
-        val target2 = url.text.toString().trim()
+        val raw = url.text.toString()
+        val target2 = fixUrl(raw)
         if (target2.isEmpty()) { toast("Stream URL + key உள்ளிடுங்கள்"); return }
+        if (target2 != raw.trim()) url.setText(target2)
         if (!hasPerms()) { toast("Camera/Mic அனுமதி தேவை"); return }
         try {
-            if (cam.prepareAudio() && cam.prepareVideo(1280, 720, 30, 2500 * 1000, 0)) {
+            if (prep(true)) {
                 val f = newRecFile()
                 recFile = f
                 try {
@@ -1013,39 +1279,121 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
                     recStartMs = SystemClock.elapsedRealtime()
                     marks.clear()
                 } catch (e: Exception) { recFile = null; toast("Recording தொடங்கவில்லை") }
+                wantRec = false
+                wantLive = true
+                connected = false
+                retryCount = 0
                 cam.startStream(target2)
                 liveBtn.text = "STOP"
                 installFilterSoon()
-            } else toast("Camera/Audio தயாராகவில்லை")
+            } else toast("இந்தத் தரம் ஆதரிக்கப்படவில்லை அல்லது கேமரா தயாராகவில்லை")
         } catch (e: Exception) {
             toast("Error: ${e.message}")
         }
     }
 
+    private fun stopLive() {
+        wantLive = false
+        connected = false
+        glView.removeCallbacks(retryRunner)
+        try {
+            if (cam.isStreaming) cam.stopStream()
+            if (cam.isRecording) { cam.stopRecord(); finishRecording() }
+        } catch (e: Exception) {}
+        liveBtn.text = "GO LIVE"
+        recBtn.text = "REC"
+        installFilterSoon()
+    }
+
+    private fun scheduleRetry() {
+        if (!wantLive) return
+        if (retryCount >= 40) {
+            toast("இணைப்பு மீளவில்லை. GO LIVE-ஐ மீண்டும் அழுத்துங்கள்")
+            wantLive = false
+            liveBtn.text = "GO LIVE"
+            return
+        }
+        retryCount++
+        glView.removeCallbacks(retryRunner)
+        glView.postDelayed(retryRunner, 4000)
+    }
+
+    private fun reconnect() {
+        if (!wantLive || cam.isStreaming) return
+        val t = fixUrl(url.text.toString())
+        try {
+            if (!cam.isRecording) {
+                if (!prep(true)) { scheduleRetry(); return }
+            }
+            cam.startStream(t)
+        } catch (e: Exception) {
+            scheduleRetry()
+        }
+    }
+
+    private fun resumeNow() {
+        resuming = false
+        val l = resumeLive
+        val r = resumeRec
+        resumeLive = false
+        resumeRec = false
+        if (!hasPerms()) return
+        if (l) { toast("Live மீண்டும் தொடங்குகிறது (பகுதி 2)"); startLive() }
+        else if (r) { toast("பதிவு மீண்டும் தொடங்குகிறது (பகுதி 2)"); startRec() }
+    }
+
     override fun surfaceCreated(h: SurfaceHolder) {}
-    override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, hh: Int) { startCam() }
+
+    override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, hh: Int) {
+        startCam()
+        if ((resumeLive || resumeRec) && !resuming) {
+            resuming = true
+            glView.postDelayed({ resumeNow() }, 1500)
+        }
+    }
+
     override fun surfaceDestroyed(h: SurfaceHolder) {
+        resumeLive = wantLive
+        resumeRec = wantRec && !wantLive
+        glView.removeCallbacks(retryRunner)
         try {
             if (cam.isStreaming) cam.stopStream()
             if (cam.isRecording) { cam.stopRecord(); finishRecording() }
             if (cam.isOnPreview) cam.stopPreview()
         } catch (e: Exception) {}
+        liveBtn.text = "GO LIVE"
+        recBtn.text = "REC"
         filterSet = false
+        saveState()
     }
 
     private fun toast(m: String) = runOnUiThread { Toast.makeText(this, m, Toast.LENGTH_SHORT).show() }
+
     override fun onConnectionStarted(url: String) {}
-    override fun onConnectionSuccess() { toast("Live தொடங்கியது") }
+
+    override fun onConnectionSuccess() {
+        connected = true
+        retryCount = 0
+        toast("Live இணைந்தது")
+    }
+
     override fun onConnectionFailed(reason: String) {
-        toast("இணைப்பு தோல்வி: $reason")
         runOnUiThread {
-            cam.stopStream()
-            liveBtn.text = "GO LIVE"
-            if (cam.isRecording) recBtn.text = "STOP REC"
+            try { cam.stopStream() } catch (e: Exception) {}
+            if (wantLive && connected) {
+                toast("இணைப்பு துண்டிப்பு - மீண்டும் இணைக்கிறது...")
+                scheduleRetry()
+            } else {
+                wantLive = false
+                toast("இணைப்பு தோல்வி: $reason")
+                liveBtn.text = "GO LIVE"
+                if (cam.isRecording) recBtn.text = "STOP REC"
+            }
         }
     }
+
     override fun onNewBitrate(bitrate: Long) {}
-    override fun onDisconnect() { toast("Disconnected") }
+    override fun onDisconnect() {}
     override fun onAuthError() { toast("Auth error") }
     override fun onAuthSuccess() {}
 }
