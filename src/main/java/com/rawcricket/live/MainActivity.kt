@@ -4,14 +4,19 @@ import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
 import android.content.ContentValues
+import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.*
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Environment
+import android.os.StatFs
 import android.os.SystemClock
 import android.provider.MediaStore
 import android.text.InputType
+import android.view.HapticFeedbackConstants
 import android.view.SurfaceHolder
 import android.view.View
 import android.view.WindowManager
@@ -61,6 +66,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
     private lateinit var url: EditText
     private lateinit var liveBtn: Button
     private lateinit var recBtn: Button
+    private lateinit var statusTv: TextView
     private var recFile: File? = null
     private var filter = ImageObjectFilterRender()
     private var filterSet = false
@@ -77,6 +83,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
     private var nsOn = true
     private var recQ = 1080
     private var liveQ = 720
+    private var splitMin = 30
     private var encW = 1280
     private var encH = 720
     private var innings = 1
@@ -90,6 +97,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
 
     private var recStartMs = 0L
     private val marks = ArrayList<String>()
+    private val warnAt = HashMap<String, Long>()
 
     private var wantLive = false
     private var wantRec = false
@@ -103,6 +111,13 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
 
     private val saver = Runnable { saveState() }
     private val retryRunner = Runnable { reconnect() }
+    private val splitRunner = Runnable { doSplit() }
+    private val statusRunner = object : Runnable {
+        override fun run() {
+            try { updateStatus() } catch (e: Exception) {}
+            glView.postDelayed(this, 5000)
+        }
+    }
 
     private var animType = ""
     private var animWord = ""
@@ -153,8 +168,14 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         tBowl = field("Bowling team", "TEAM B")
         url = field("Stream URL + key", "", 11f)
         url.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
-        liveBtn = Button(this).apply { text = "GO LIVE"; setOnClickListener { toggleLive() } }
-        recBtn = Button(this).apply { text = "REC"; setOnClickListener { toggleRec() } }
+        liveBtn = Button(this).apply {
+            text = "GO LIVE"
+            setOnClickListener { v -> v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP); toggleLive() }
+        }
+        recBtn = Button(this).apply {
+            text = "REC"
+            setOnClickListener { v -> v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP); toggleRec() }
+        }
         val row1 = LinearLayout(this)
         row1.addView(tBat, lp(1f)); row1.addView(tBowl, lp(1f)); row1.addView(url, lp(2f))
         row1.addView(recBtn, LinearLayout.LayoutParams(-2, -2))
@@ -178,7 +199,10 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
 
         val row3 = LinearLayout(this)
         fun btn(t: String, a: () -> Unit) {
-            row3.addView(Button(this).apply { text = t; textSize = 12f; setPadding(0, 0, 0, 0); setOnClickListener { a() } }, lp(1f))
+            row3.addView(Button(this).apply {
+                text = t; textSize = 12f; setPadding(0, 0, 0, 0)
+                setOnClickListener { v -> v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP); a() }
+            }, lp(1f))
         }
         for (r in listOf(0, 1, 2, 3, 4, 6)) btn("$r") {
             deliver(true, "$r", batRuns = r, bowlerRuns = r, cross = if (r >= 4) 0 else r)
@@ -193,17 +217,29 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
 
         val row4 = LinearLayout(this)
         fun btn4(t: String, a: () -> Unit) {
-            row4.addView(Button(this).apply { text = t; textSize = 12f; setPadding(0, 0, 0, 0); setOnClickListener { a() } }, lp(1f))
+            row4.addView(Button(this).apply {
+                text = t; textSize = 12f; setPadding(0, 0, 0, 0)
+                setOnClickListener { v -> v.performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP); a() }
+            }, lp(1f))
         }
         btn4("TOSS") { showToss() }
         btn4("TEAMS") { showTeams() }
         btn4("MATCH") { showMatch() }
         btn4("SWAP") { confirmSwap() }
         btn4("CARD") { cardPage = if (cardPage == 0) 1 else 0; refresh() }
+        btn4("SAVE") { saveCardImage() }
         btn4("★ MARK") { mark("MANUAL", true) }
         btn4("NEW") { newMatch() }
         btn4("DIM") { toggleDim() }
         top.addView(row4)
+
+        statusTv = TextView(this).apply {
+            textSize = 11f
+            setTextColor(Color.LTGRAY)
+            setPadding(12, 2, 12, 4)
+            text = ""
+        }
+        top.addView(statusTv)
 
         root.addView(top, FrameLayout.LayoutParams(-1, -2, android.view.Gravity.TOP))
         setContentView(root)
@@ -213,6 +249,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
 
         cam = RtmpCamera2(glView, this)
         glView.holder.addCallback(this)
+        glView.postDelayed(statusRunner, 1000)
 
         val perms = arrayOf(Manifest.permission.CAMERA, Manifest.permission.RECORD_AUDIO)
         if (perms.any { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }) {
@@ -223,6 +260,111 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
     override fun onPause() {
         super.onPause()
         saveState()
+    }
+
+    // ---------- status, warnings, storage ----------
+
+    private fun freeBytes(): Long = try {
+        val dir = getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: filesDir
+        StatFs(dir.path).availableBytes
+    } catch (e: Exception) { -1L }
+
+    private fun fmtGb(b: Long): String = String.format(Locale.US, "%.1fGB", b / 1073741824.0)
+
+    private fun curKbps(): Int =
+        if (wantLive || cam.isStreaming) kbpsFor(liveQ, true) else kbpsFor(recQ, false)
+
+    private fun spaceOk(): Boolean {
+        val f = freeBytes()
+        if (f in 0..500_000_000L) {
+            toast("இடம் மிகக் குறைவு (${fmtGb(f)}). பழைய வீடியோக்களை நீக்குங்கள்")
+            return false
+        }
+        return true
+    }
+
+    private fun warn(key: String, msg: String, gapMs: Long) {
+        val now = SystemClock.elapsedRealtime()
+        val last = warnAt[key] ?: -gapMs
+        if (now - last >= gapMs) {
+            warnAt[key] = now
+            toast(msg)
+        }
+    }
+
+    private fun updateStatus() {
+        val i = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+        val lvl = i?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+        val scale = i?.getIntExtra(BatteryManager.EXTRA_SCALE, 100) ?: 100
+        val pct = if (lvl >= 0 && scale > 0) lvl * 100 / scale else -1
+        val temp = (i?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0) / 10.0
+        val plugged = (i?.getIntExtra(BatteryManager.EXTRA_PLUGGED, 0) ?: 0) != 0
+        val free = freeBytes()
+        val mins = if (free > 0) (free / (curKbps() * 125L + 16000L) / 60).toInt() else 0
+        val recTxt = if (cam.isRecording) {
+            val s = ((SystemClock.elapsedRealtime() - recStartMs) / 1000).toInt().coerceAtLeast(0)
+            String.format(Locale.US, "   ⏺ %02d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
+        } else ""
+        statusTv.text = String.format(Locale.US, "🔋%d%%%s   🌡%.1f°C   💾%s (~%dh %dm)", pct, if (plugged) "⚡" else "", temp, fmtGb(free), mins / 60, mins % 60) + recTxt
+
+        if (temp >= 44.0) warn("hot2", "வெப்பம் மிக அதிகம் (" + String.format(Locale.US, "%.1f", temp) + "°C)! DIM அழுத்தி, நிழலில் வையுங்கள்; 540p-க்கு மாறுங்கள்", 120_000L)
+        else if (temp >= 41.0) warn("hot1", "வெப்பம் அதிகரிக்கிறது (" + String.format(Locale.US, "%.1f", temp) + "°C). DIM அழுத்துங்கள், நிழலில் வையுங்கள்", 300_000L)
+        if (pct in 0..15 && !plugged) warn("bat", "Battery $pct% - சார்ஜரை இணையுங்கள்", 180_000L)
+        if (cam.isRecording && free in 0..2_000_000_000L) warn("space", "இடம் குறைவு (${fmtGb(free)})! பழைய வீடியோக்களை நீக்குங்கள்", 180_000L)
+    }
+
+    // ---------- recording split ----------
+
+    private fun scheduleSplit() {
+        glView.removeCallbacks(splitRunner)
+        if (splitMin > 0 && cam.isRecording) glView.postDelayed(splitRunner, splitMin * 60_000L)
+    }
+
+    private fun doSplit() {
+        if (!cam.isRecording) return
+        try {
+            if (cam.isStreaming || wantLive) {
+                cam.stopRecord()
+                finishRecording()
+                val f = newRecFile()
+                recFile = f
+                cam.startRecord(f.absolutePath)
+                recStartMs = SystemClock.elapsedRealtime()
+                marks.clear()
+                toast("பதிவு புதிய கோப்பாகப் பிரிக்கப்பட்டது")
+            } else {
+                stopRec()
+                startRec()
+            }
+        } catch (e: Exception) {
+            recFile = null
+            toast("பதிவைப் பிரிக்க முடியவில்லை: ${e.message}")
+        }
+        scheduleSplit()
+    }
+
+    // ---------- scorecard image ----------
+
+    private fun saveCardImage() {
+        if (Build.VERSION.SDK_INT < 29) { toast("இந்த வசதிக்கு Android 10+ தேவை"); return }
+        try {
+            val bmp = Bitmap.createBitmap(1280, 720, Bitmap.Config.ARGB_8888)
+            val c = Canvas(bmp)
+            val p = Paint(Paint.ANTI_ALIAS_FLAG)
+            p.typeface = Typeface.DEFAULT_BOLD
+            drawCard(c, p)
+            val v = ContentValues().apply {
+                put(MediaStore.Images.Media.DISPLAY_NAME, "Scorecard_" + SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date()) + ".png")
+                put(MediaStore.Images.Media.MIME_TYPE, "image/png")
+                put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/RawCricket")
+            }
+            val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v)
+                ?: throw Exception("insert failed")
+            contentResolver.openOutputStream(uri)?.use { bmp.compress(Bitmap.CompressFormat.PNG, 100, it) }
+            toast("Scorecard படம் சேமிக்கப்பட்டது: Gallery → Pictures/RawCricket")
+        } catch (e: Exception) {
+            toast("படம் சேமிக்க முடியவில்லை")
+        }
     }
 
     // ---------- persistence ----------
@@ -400,6 +542,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         maxPerBowler = p.getInt("mb", 0)
         freeHitOn = p.getBoolean("fh", true)
         nsOn = p.getBoolean("ns", true)
+        splitMin = p.getInt("sp", 30)
         val qr = p.getInt("qr", 1080)
         recQ = if (qr == 540 || qr == 720 || qr == 1080) qr else 1080
         val ql = p.getInt("ql", 720)
@@ -411,6 +554,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
     private fun showMatch() {
         val eO = EditText(this).apply { hint = "மொத்த ஓவர்கள்"; setText("$totalOvers"); inputType = InputType.TYPE_CLASS_NUMBER }
         val eB = EditText(this).apply { hint = "ஒரு bowler-க்கு அதிகபட்ச ஓவர் (0 = தானாக)"; setText("$maxPerBowler"); inputType = InputType.TYPE_CLASS_NUMBER }
+        val eS = EditText(this).apply { hint = "பதிவைப் பிரிக்கும் இடைவெளி (நிமிடம்; 0 = பிரிக்காதே)"; setText("$splitMin"); inputType = InputType.TYPE_CLASS_NUMBER }
         val cb = CheckBox(this).apply { text = "No-ball-க்குப் பின் Free Hit"; isChecked = freeHitOn }
         val cn = CheckBox(this).apply { text = "ஆடியோ சத்தம் குறைப்பு (Noise suppression)"; isChecked = nsOn }
 
@@ -433,7 +577,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         }
 
         val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 12, 24, 12) }
-        box.addView(eO); box.addView(eB); box.addView(cb); box.addView(cn)
+        box.addView(eO); box.addView(eB); box.addView(eS); box.addView(cb); box.addView(cn)
         box.addView(tvR); box.addView(rgR); box.addView(tvL); box.addView(rgL); box.addView(note)
         val sv = ScrollView(this)
         sv.addView(box)
@@ -442,16 +586,17 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
             .setPositiveButton("Save") { _, _ ->
                 totalOvers = eO.text.toString().toIntOrNull()?.coerceAtLeast(1) ?: totalOvers
                 maxPerBowler = eB.text.toString().toIntOrNull()?.coerceAtLeast(0) ?: maxPerBowler
+                splitMin = eS.text.toString().toIntOrNull()?.coerceAtLeast(0) ?: splitMin
                 freeHitOn = cb.isChecked
                 nsOn = cn.isChecked
                 val sr = rgR.checkedRadioButtonId
                 recQ = if (sr == 540 || sr == 720 || sr == 1080) sr else 1080
                 val sl = rgL.checkedRadioButtonId - 1000
                 liveQ = if (sl == 540 || sl == 720) sl else 720
-                prefs().edit().putInt("ov", totalOvers).putInt("mb", maxPerBowler)
+                prefs().edit().putInt("ov", totalOvers).putInt("mb", maxPerBowler).putInt("sp", splitMin)
                     .putBoolean("fh", freeHitOn).putBoolean("ns", nsOn)
                     .putInt("qr", recQ).putInt("ql", liveQ).apply()
-                toast("ஆடியோ/தர மாற்றம் அடுத்த REC/Live-ல் செயல்படும்")
+                toast("ஆடியோ/தர/பிரிப்பு மாற்றம் அடுத்த REC/Live-ல் செயல்படும்")
                 refresh()
             }
             .setNegativeButton("Cancel", null)
@@ -1232,6 +1377,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         try {
             if (cam.isStreaming || cam.isRecording) return
             if (!hasPerms()) { toast("Camera/Mic அனுமதி தேவை"); return }
+            if (!spaceOk()) return
             if (prep(false)) {
                 val f = newRecFile()
                 recFile = f
@@ -1241,6 +1387,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
                 wantRec = true
                 recBtn.text = "STOP REC"
                 installFilterSoon()
+                scheduleSplit()
             } else toast("இந்தத் தரம் ஆதரிக்கப்படவில்லை அல்லது கேமரா தயாராகவில்லை")
         } catch (e: Exception) {
             toast("Error: ${e.message}")
@@ -1250,6 +1397,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
     private fun stopRec() {
         try {
             wantRec = false
+            glView.removeCallbacks(splitRunner)
             if (cam.isRecording) { cam.stopRecord(); finishRecording() }
             recBtn.text = "REC"
             installFilterSoon()
@@ -1270,6 +1418,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         if (target2.isEmpty()) { toast("Stream URL + key உள்ளிடுங்கள்"); return }
         if (target2 != raw.trim()) url.setText(target2)
         if (!hasPerms()) { toast("Camera/Mic அனுமதி தேவை"); return }
+        if (!spaceOk()) return
         try {
             if (prep(true)) {
                 val f = newRecFile()
@@ -1278,6 +1427,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
                     cam.startRecord(f.absolutePath)
                     recStartMs = SystemClock.elapsedRealtime()
                     marks.clear()
+                    scheduleSplit()
                 } catch (e: Exception) { recFile = null; toast("Recording தொடங்கவில்லை") }
                 wantRec = false
                 wantLive = true
@@ -1296,6 +1446,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         wantLive = false
         connected = false
         glView.removeCallbacks(retryRunner)
+        glView.removeCallbacks(splitRunner)
         try {
             if (cam.isStreaming) cam.stopStream()
             if (cam.isRecording) { cam.stopRecord(); finishRecording() }
@@ -1356,6 +1507,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         resumeLive = wantLive
         resumeRec = wantRec && !wantLive
         glView.removeCallbacks(retryRunner)
+        glView.removeCallbacks(splitRunner)
         try {
             if (cam.isStreaming) cam.stopStream()
             if (cam.isRecording) { cam.stopRecord(); finishRecording() }
