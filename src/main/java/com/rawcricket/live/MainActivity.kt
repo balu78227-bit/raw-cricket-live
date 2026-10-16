@@ -47,12 +47,14 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         val pr: Int = 0, val pb: Int = 0, val fow: List<String> = emptyList(),
         val n1: String = "", val n2: String = "", val bn: String = "",
         val ovBalls: List<String> = emptyList(), val ovRuns: Int = 0, val ovBR: Int = 0,
-        val ovList: List<Int> = emptyList(), val hat: Map<String, Int> = emptyMap()
+        val ovList: List<Int> = emptyList(), val hat: Map<String, Int> = emptyMap(),
+        val how: Map<String, String> = emptyMap()
     )
     data class Inn(
         val team: String, val runs: Int, val wk: Int, val legal: Int,
         val bat: Map<String, BS>, val outs: Set<String>, val bowl: Map<String, BW>,
-        val fow: List<String>, val ovList: List<Int> = emptyList()
+        val fow: List<String>, val ovList: List<Int> = emptyList(),
+        val how: Map<String, String> = emptyMap()
     )
 
     private val palette = listOf(
@@ -233,13 +235,14 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         val row4 = LinearLayout(this)
         fun btn4(t: String, a: () -> Unit) {
             row4.addView(Button(this).apply {
-                text = t; textSize = 12f; setPadding(0, 0, 0, 0)
+                text = t; textSize = 11f; setPadding(0, 0, 0, 0)
                 setOnClickListener { a() }
             }, lp(1f))
         }
         btn4("TOSS") { showToss() }
         btn4("TEAMS") { showTeams() }
         btn4("MATCH") { showMatch() }
+        btn4("EDIT") { showEdit() }
         btn4("SWAP") { confirmSwap() }
         btn4("CARD") { cardPage = (cardPage + 1) % 3; refresh() }
         btn4("SAVE") { saveCardImage() }
@@ -426,6 +429,12 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         return o
     }
 
+    private fun howJ(m: Map<String, String>): JSONObject {
+        val o = JSONObject()
+        for ((k, v) in m) o.put(k, v)
+        return o
+    }
+
     private fun batP(o: JSONObject): Map<String, BS> {
         val m = LinkedHashMap<String, BS>()
         val ks = o.keys()
@@ -460,6 +469,18 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         return m
     }
 
+    private fun howP(o: JSONObject?): Map<String, String> {
+        val m = LinkedHashMap<String, String>()
+        if (o != null) {
+            val ks = o.keys()
+            while (ks.hasNext()) {
+                val k = ks.next()
+                m[k] = o.getString(k)
+            }
+        }
+        return m
+    }
+
     private fun strL(a: JSONArray): List<String> {
         val l = ArrayList<String>()
         for (i in 0 until a.length()) l.add(a.getString(i))
@@ -488,6 +509,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         o.put("n1", s.n1); o.put("n2", s.n2); o.put("bn", s.bn)
         o.put("ob", JSONArray(s.ovBalls)); o.put("or", s.ovRuns); o.put("obr", s.ovBR)
         o.put("ol", JSONArray(s.ovList)); o.put("hat", hatJ(s.hat))
+        o.put("how", howJ(s.how))
         return o
     }
 
@@ -499,7 +521,8 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         strL(o.getJSONArray("fow")),
         o.getString("n1"), o.getString("n2"), o.getString("bn"),
         ovBalls = optStrL(o, "ob"), ovRuns = o.optInt("or", 0), ovBR = o.optInt("obr", 0),
-        ovList = optIntL(o, "ol"), hat = hatP(o.optJSONObject("hat"))
+        ovList = optIntL(o, "ol"), hat = hatP(o.optJSONObject("hat")),
+        how = howP(o.optJSONObject("how"))
     )
 
     private fun innJ(i: Inn): JSONObject {
@@ -508,6 +531,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         o.put("bat", batJ(i.bat)); o.put("outs", JSONArray(i.outs.toList()))
         o.put("bowl", bowlJ(i.bowl)); o.put("fow", JSONArray(i.fow))
         o.put("ol", JSONArray(i.ovList))
+        o.put("how", howJ(i.how))
         return o
     }
 
@@ -515,7 +539,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         o.getString("team"), o.getInt("runs"), o.getInt("wk"), o.getInt("legal"),
         batP(o.getJSONObject("bat")), strL(o.getJSONArray("outs")).toSet(),
         bowlP(o.getJSONObject("bowl")), strL(o.getJSONArray("fow")),
-        optIntL(o, "ol")
+        optIntL(o, "ol"), howP(o.optJSONObject("how"))
     )
 
     private fun saveState() {
@@ -782,9 +806,26 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         choose("யார் அவுட்?", items) { cb(it) }
     }
 
+    private fun askFielder(cb: (String) -> Unit) {
+        val list = bowlPlayers()
+        if (list.isEmpty()) { cb(""); return }
+        val items = list + "— தவிர் / தெரியாது"
+        choose("Fielder (பிடித்தவர் / ரன்-அவுட் செய்தவர்)", items) { i -> cb(if (i < list.size) list[i] else "") }
+    }
+
+    private fun howText(type: String, bn: String, f: String): String = when (type) {
+        "Bowled" -> "b $bn"
+        "LBW" -> "lbw b $bn"
+        "Caught" -> if (f.isEmpty()) "c b $bn" else if (f == bn) "c & b $bn" else "c $f b $bn"
+        "Stumped" -> if (f.isEmpty()) "st b $bn" else "st $f b $bn"
+        "Hit wicket" -> "hit wkt b $bn"
+        "Run out" -> if (f.isEmpty()) "run out" else "run out ($f)"
+        else -> "out"
+    }
+
     private fun snap() = Inn(
         nm(tBat, "TEAM A"), st.runs, st.wk, st.legal, st.bat, st.outs, st.bowl, st.fow,
-        if (st.ovBalls.isNotEmpty()) st.ovList + st.ovRuns else st.ovList
+        if (st.ovBalls.isNotEmpty()) st.ovList + st.ovRuns else st.ovList, st.how
     )
 
     private fun showToss() {
@@ -854,6 +895,140 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         saveSoon()
     }
 
+    // ---------- manual edit & rename ----------
+
+    private fun num(e: EditText, d: Int): Int = e.text.toString().trim().toIntOrNull()?.coerceAtLeast(0) ?: d
+
+    private fun parseOv(s: String, d: Int): Int {
+        val t = s.trim()
+        if (t.isEmpty()) return d
+        val parts = t.split(".")
+        val o = parts[0].toIntOrNull() ?: return d
+        val b = if (parts.size > 1) (parts[1].toIntOrNull() ?: 0).coerceIn(0, 5) else 0
+        return o.coerceAtLeast(0) * 6 + b
+    }
+
+    private fun showEdit() {
+        if (matchOver) { toast("போட்டி முடிந்த நிலையில் Undo பயன்படுத்துங்கள்"); return }
+        val n1 = nm(b1, "Batter 1"); val n2 = nm(b2, "Batter 2"); val bn = nm(bowler, "Bowler")
+        fun et(h: String, v: String, dec: Boolean = false): EditText = EditText(this).apply {
+            hint = h; setText(v); setSingleLine()
+            inputType = if (dec) (InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL) else InputType.TYPE_CLASS_NUMBER
+        }
+        fun lbl(t: String): TextView = TextView(this).apply { text = t; setPadding(0, 18, 0, 0); setTypeface(null, Typeface.BOLD) }
+
+        val s1 = st.bat[n1] ?: BS()
+        val s2 = st.bat[n2] ?: BS()
+        val bwS = st.bowl[bn] ?: BW()
+        val eRuns = et("Runs", "${st.runs}")
+        val eWk = et("Wickets", "${st.wk}")
+        val eOv = et("Overs (எ.கா. 3.4)", ov(st.legal), true)
+        val e1r = et("$n1 ரன்", "${s1.r}")
+        val e1b = et("$n1 பந்து", "${s1.b}")
+        val e2r = et("$n2 ரன்", "${s2.r}")
+        val e2b = et("$n2 பந்து", "${s2.b}")
+        val ebw = et("$bn விக்கெட்", "${bwS.w}")
+        val ebr = et("$bn ரன்", "${bwS.runs}")
+        val ebo = et("$bn ஓவர் (எ.கா. 2.3)", ov(bwS.balls), true)
+
+        val names = LinkedHashSet<String>()
+        names.addAll(st.bat.keys); names.addAll(st.bowl.keys)
+        names.addAll(playersA); names.addAll(playersB)
+        names.add(n1); names.add(n2); names.add(bn)
+        val nameList = names.filter { it.isNotEmpty() }
+        val spN = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, nameList)
+        }
+        val eNew = EditText(this).apply { hint = "புதிய பெயர் (காலியாக விட்டால் மாற்றம் இல்லை)"; setSingleLine() }
+
+        val box = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(24, 12, 24, 12) }
+        box.addView(lbl("அணி ஸ்கோர்"))
+        box.addView(eRuns); box.addView(eWk); box.addView(eOv)
+        box.addView(lbl("தற்போதைய batter-கள்"))
+        box.addView(e1r); box.addView(e1b); box.addView(e2r); box.addView(e2b)
+        box.addView(lbl("தற்போதைய bowler"))
+        box.addView(ebw); box.addView(ebr); box.addView(ebo)
+        box.addView(lbl("வீரர் பெயர் மாற்றம்"))
+        box.addView(spN); box.addView(eNew)
+        val sv = ScrollView(this)
+        sv.addView(box)
+
+        AlertDialog.Builder(this).setTitle("திருத்தம் (EDIT)").setView(sv)
+            .setPositiveButton("Save") { _, _ ->
+                hist.add(st.copy(n1 = n1, n2 = n2, bn = bn))
+                if (hist.size > 60) hist.removeAt(0)
+                val bat = st.bat.toMutableMap()
+                bat[n1] = BS(num(e1r, s1.r), num(e1b, s1.b))
+                bat[n2] = BS(num(e2r, s2.r), num(e2b, s2.b))
+                val bwm = st.bowl.toMutableMap()
+                bwm[bn] = BW(parseOv(ebo.text.toString(), bwS.balls), num(ebr, bwS.runs), num(ebw, bwS.w))
+                val newRuns = num(eRuns, st.runs)
+                val newWk = num(eWk, st.wk)
+                val newLegal = parseOv(eOv.text.toString(), st.legal)
+                val reset = newRuns != st.runs || newLegal != st.legal
+                st = st.copy(
+                    runs = newRuns, wk = newWk, legal = newLegal, bat = bat, bowl = bwm,
+                    ovBalls = if (reset) emptyList() else st.ovBalls,
+                    ovRuns = if (reset) 0 else st.ovRuns,
+                    ovBR = if (reset) 0 else st.ovBR,
+                    pr = if (reset) 0 else st.pr,
+                    pb = if (reset) 0 else st.pb
+                )
+                val newName = eNew.text.toString().trim()
+                val oldName = if (nameList.isNotEmpty()) nameList[spN.selectedItemPosition] else ""
+                if (newName.isNotEmpty() && oldName.isNotEmpty() && newName != oldName) renamePlayer(oldName, newName)
+                refresh()
+                saveSoon()
+                toast("திருத்தம் சேமிக்கப்பட்டது")
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun <V> mv(m: Map<String, V>, old: String, new: String): Map<String, V> {
+        val r = LinkedHashMap<String, V>()
+        for ((k, v) in m) r[if (k == old) new else k] = v
+        return r
+    }
+
+    private fun rep(s: String, old: String, new: String): String {
+        val re = Regex("(?<![\\p{L}\\p{M}\\p{N}])" + Regex.escape(old) + "(?![\\p{L}\\p{M}\\p{N}])")
+        return re.replace(s, Regex.escapeReplacement(new))
+    }
+
+    private fun renameSt(s: St, old: String, new: String): St = s.copy(
+        bat = mv(s.bat, old, new), bowl = mv(s.bowl, old, new), hat = mv(s.hat, old, new),
+        how = mv(s.how, old, new).mapValues { rep(it.value, old, new) },
+        outs = s.outs.map { if (it == old) new else it }.toSet(),
+        lastBowler = if (s.lastBowler == old) new else s.lastBowler,
+        fow = s.fow.map { rep(it, old, new) },
+        n1 = if (s.n1 == old) new else s.n1,
+        n2 = if (s.n2 == old) new else s.n2,
+        bn = if (s.bn == old) new else s.bn
+    )
+
+    private fun renamePlayer(old: String, new: String) {
+        st = renameSt(st, old, new)
+        for (i in hist.indices) hist[i] = renameSt(hist[i], old, new)
+        inn1 = inn1?.let { a ->
+            a.copy(
+                bat = mv(a.bat, old, new), bowl = mv(a.bowl, old, new),
+                how = mv(a.how, old, new).mapValues { rep(it.value, old, new) },
+                outs = a.outs.map { if (it == old) new else it }.toSet(),
+                fow = a.fow.map { rep(it, old, new) }
+            )
+        }
+        playersA = playersA.map { if (it == old) new else it }
+        playersB = playersB.map { if (it == old) new else it }
+        prefs().edit()
+            .putString("pA", playersA.joinToString("\n"))
+            .putString("pB", playersB.joinToString("\n"))
+            .apply()
+        if (b1.text.toString().trim() == old) b1.setText(new)
+        if (b2.text.toString().trim() == old) b2.setText(new)
+        if (bowler.text.toString().trim() == old) bowler.setText(new)
+    }
+
     // ---------- highlight markers ----------
 
     private fun mark(label: String, manual: Boolean = false) {
@@ -912,8 +1087,14 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         choose("Wide", items) { i ->
             when {
                 i <= 4 -> deliver(false, items[i], extra = 1 + i, bowlerRuns = 1 + i, cross = if (i == 4) 0 else i, faced = false)
-                i == 5 -> askWho { s -> deliver(false, "Wd+RO", extra = 1, bowlerRuns = 1, faced = false, wk = "Run out", outSlot = s) }
-                else -> deliver(false, "Wd+St", extra = 1, bowlerRuns = 1, faced = false, wk = "Stumped", outSlot = st.strike, credit = true)
+                i == 5 -> askWho { s ->
+                    askFielder { f ->
+                        deliver(false, "Wd+RO", extra = 1, bowlerRuns = 1, faced = false, wk = "Run out", outSlot = s, how = howText("Run out", "", f))
+                    }
+                }
+                else -> askFielder { f ->
+                    deliver(false, "Wd+St", extra = 1, bowlerRuns = 1, faced = false, wk = "Stumped", outSlot = st.strike, credit = true, how = howText("Stumped", nm(bowler, "Bowler"), f))
+                }
             }
         }
     }
@@ -931,7 +1112,11 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
                     val n = listOf(1, 2, 4)[i - 6]
                     deliver(false, "Nb+B$n", extra = 1 + n, bowlerRuns = 1, cross = if (n == 4) 0 else n, setFH = freeHitOn)
                 }
-                else -> askWho { s -> deliver(false, "Nb+RO", extra = 1, bowlerRuns = 1, wk = "Run out", outSlot = s, setFH = freeHitOn) }
+                else -> askWho { s ->
+                    askFielder { f ->
+                        deliver(false, "Nb+RO", extra = 1, bowlerRuns = 1, wk = "Run out", outSlot = s, setFH = freeHitOn, how = howText("Run out", "", f))
+                    }
+                }
             }
         }
     }
@@ -950,11 +1135,17 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         choose("Dismissal", types) { i ->
             val t = types[i]
             if (t in listOf("Bowled", "Caught", "LBW", "Stumped", "Hit wicket")) {
-                deliver(true, "W", wk = t, outSlot = st.strike, credit = true)
+                val go = { f: String ->
+                    deliver(true, "W", wk = t, outSlot = st.strike, credit = true, how = howText(t, nm(bowler, "Bowler"), f))
+                }
+                if (t == "Caught" || t == "Stumped") askFielder(go) else go("")
             } else {
                 askWho { slot ->
                     choose("ஓடிய ரன்கள்", listOf("0", "1", "2", "3")) { r ->
-                        deliver(true, if (t == "Run out") "RO" else "W", batRuns = r, bowlerRuns = r, cross = r, wk = t, outSlot = slot)
+                        val go = { f: String ->
+                            deliver(true, if (t == "Run out") "RO" else "W", batRuns = r, bowlerRuns = r, cross = r, wk = t, outSlot = slot, how = howText(t, nm(bowler, "Bowler"), f))
+                        }
+                        if (t == "Run out") askFielder(go) else go("")
                     }
                 }
             }
@@ -984,7 +1175,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         legal: Boolean, label: String,
         batRuns: Int = 0, extra: Int = 0, bowlerRuns: Int = 0, cross: Int = 0,
         faced: Boolean = true, wk: String? = null, outSlot: Int = 0,
-        credit: Boolean = false, setFH: Boolean = false
+        credit: Boolean = false, setFH: Boolean = false, how: String? = null
     ) {
         if (matchOver) { toast("போட்டி முடிந்தது. தவறு என்றால் Undo அழுத்துங்கள்"); return }
         cardPage = 0
@@ -1005,6 +1196,7 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         if (overEnded) strike = 1 - strike
         val outName = if (outSlot == 0) n1 else n2
         val outs = if (wk != null) st.outs + outName else st.outs
+        val newHow = if (wk != null) st.how + (outName to (how ?: howText(wk, bn, ""))) else st.how
         val fh = if (setFH) true else if (legal) false else st.fh
         var pr = st.pr + batRuns + extra
         var pb = st.pb + (if (legal) 1 else 0)
@@ -1048,7 +1240,8 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
             lastBowler = if (overEnded) bn else st.lastBowler,
             fh = fh, extras = st.extras + extra, pr = pr, pb = pb, fow = fow,
             n1 = "", n2 = "", bn = "",
-            ovBalls = oBalls, ovRuns = oRuns, ovBR = oBR, ovList = oList, hat = hat
+            ovBalls = oBalls, ovRuns = oRuns, ovBR = oBR, ovList = oList, hat = hat,
+            how = newHow
         )
         refresh()
         saveSoon()
@@ -1304,13 +1497,20 @@ class MainActivity : Activity(), ConnectChecker, SurfaceHolder.Callback {
         p.textSize = 18f; p.color = Color.LTGRAY
         c.drawText("BATTING", x, y, p)
         y += 24f
-        p.textSize = 21f
-        for ((n, s) in inn.bat.entries.take(11)) {
-            p.color = Color.WHITE; p.textAlign = Paint.Align.LEFT
-            fit(c, n + (if (n in inn.outs) "" else "*"), x, y, w - 130f, p)
-            p.color = gold; p.textAlign = Paint.Align.RIGHT
+        val entries = inn.bat.entries.take(11)
+        val two = entries.size <= 7
+        for ((n, s) in entries) {
+            val isOut = n in inn.outs
+            p.textAlign = Paint.Align.LEFT
+            p.textSize = 21f; p.color = Color.WHITE
+            fit(c, n + (if (isOut) "" else "*"), x, y, if (two) w - 130f else 150f, p)
+            val hw = inn.how[n] ?: (if (isOut) "out" else "not out")
+            p.textSize = 15f; p.color = Color.LTGRAY
+            if (two) fit(c, hw, x, y + 17f, w - 130f, p)
+            else fit(c, hw, x + 158f, y, w - 130f - 158f, p)
+            p.textSize = 21f; p.color = gold; p.textAlign = Paint.Align.RIGHT
             c.drawText("${s.r} (${s.b})", x + w, y, p)
-            y += 25f
+            y += if (two) 38f else 25f
         }
         p.textAlign = Paint.Align.LEFT
         y += 12f
