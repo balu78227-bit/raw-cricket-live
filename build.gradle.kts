@@ -7,11 +7,11 @@ android {
     namespace = "com.rawcricket.live"
     compileSdk = 34
     defaultConfig {
-        applicationId = "com.rawcricket.live"
+        applicationId = "com.rawcricket.pro"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "2.0"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
@@ -23,4 +23,7 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("com.github.pedroSG94.RootEncoder:library:2.5.5")
+    implementation("com.github.pedroSG94.RootEncoder:extra-sources:2.5.5")
+    implementation("androidx.media3:media3-exoplayer:1.4.1")
+    implementation("androidx.media3:media3-exoplayer-rtsp:1.4.1")
 }
