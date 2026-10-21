@@ -1,11 +1,11 @@
 plugins {
-    id("com.android.application") version "8.5.2"
+    id("com.android.application") version "8.6.1"
     id("org.jetbrains.kotlin.android") version "2.1.0"
 }
 
 android {
     namespace = "com.rawcricket.live"
-    compileSdk = 34
+    compileSdk = 35
     defaultConfig {
         applicationId = "com.rawcricket.pro"
         minSdk = 24
